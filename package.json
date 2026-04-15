@@ -1,0 +1,46 @@
+{
+  "name": "fpv-online",
+  "version": "1.0.0",
+  "description": "FPV Drone Simulator",
+  "author": "BSTKT",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n VITE,BACK -c cyan,green \"npm run dev:vite\" \"npm run dev:back\"",
+    "dev:vite": "vite",
+    "dev:back": "node backend/server.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "dist": "vite build && electron-builder",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "build": {
+    "appId": "com.fpv.online",
+    "productName": "FPV Online",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/assets/images/logo.png"
+    }
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
+    "@vitejs/plugin-react-swc": "^4.3.0",
+    "cannon-es": "^0.20.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "three": "^0.183.2",
+    "vite": "^8.0.1"
+  }
+}
