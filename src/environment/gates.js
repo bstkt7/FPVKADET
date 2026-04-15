@@ -99,6 +99,22 @@ export function createBox(scene, colliders, x, y, z, w, h, d) {
     colliders.push({ cx: x, cy: y + h / 2, cz: z, hw: w / 2, hh: h / 2, hd: d / 2, rotY: 0 });
 }
 
+export function createBuilding(scene, colliders, x, z, h) {
+    const w = 15 + Math.random() * 20;
+    const d = 15 + Math.random() * 20;
+    // Окна / стекло: серо-голубые оттенки
+    const hue = 0.5 + Math.random() * 0.15;
+    const lit = 0.15 + Math.random() * 0.25;
+    const color = new THREE.Color().setHSL(hue, 0.4, lit);
+    
+    // Легкий материал с отражениями
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.3, metalness: 0.7 });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    mesh.position.set(x, h / 2, z);
+    scene.add(mesh);
+    colliders.push({ cx: x, cy: h / 2, cz: z, hw: w / 2, hh: h / 2, hd: d / 2, rotY: 0 });
+}
+
 export function createPine(scene, colliders, x, z) {
     const group = new THREE.Group();
     group.position.set(x, 0, z);
@@ -167,6 +183,35 @@ export function buildTrack(scene, colliders, gateObjects) {
                 createPine(scene, colliders,
                     (Math.random() - 0.5) * 400,
                     (Math.random() - 0.5) * 400);
+            }
+        } else if (mapType === 'city_run') {
+            const gates = TRACK_DATA.city_run || [];
+            let attempts = 0;
+            let spawned = 0;
+            // Спавним ~40 зданий 
+            while (spawned < 45 && attempts < 200) {
+                attempts++;
+                const px = (Math.random() - 0.5) * 500;
+                const pz = (Math.random() - 0.5) * 500;
+                const h = 20 + Math.random() * 80; // высотки
+                
+                // Проверка, чтобы не загородить ворота (оставляем радиус ~35 метров)
+                let tooClose = false;
+                for (const g of gates) {
+                    const dist = Math.hypot(g.x - px, g.z - pz);
+                    if (dist < 38) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+                
+                // Не ставим на прямо спавне
+                if (Math.hypot(SPAWN_POS.x - px, SPAWN_POS.z - pz) < 35) tooClose = true;
+
+                if (!tooClose) {
+                    createBuilding(scene, colliders, px, pz, h);
+                    spawned++;
+                }
             }
         }
     } else {

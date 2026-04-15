@@ -138,6 +138,24 @@ function QuickConfigPanel({ settings, onChange }) {
                     </div>
                 </PanelSection>
 
+                {/* Camera Mode */}
+                <PanelSection title="РЕЖИМ ВИДА" color="#b392f0">
+                    <div style={{ display: 'flex', gap: 5 }}>
+                        <QuickChip
+                            label="FPV"
+                            active={settings.cameraMode === 'fpv'}
+                            color="#b392f0"
+                            onClick={() => onChange('cameraMode', 'fpv')}
+                        />
+                        <QuickChip
+                            label="GOV (вниз)"
+                            active={settings.cameraMode === 'gov'}
+                            color="#b392f0"
+                            onClick={() => onChange('cameraMode', 'gov')}
+                        />
+                    </div>
+                </PanelSection>
+
                 {/* Map */}
                 <PanelSection title="ТРАССА" color={T.accent}>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>

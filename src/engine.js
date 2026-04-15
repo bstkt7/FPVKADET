@@ -14,7 +14,7 @@ import {
     buildTrack, createWeatherParticles, updateWeatherParticles,
     createUHangar, updatePeople
 } from './environment/index.js';
-import { tryAudioInit, updateAudio, playCheckpoint, playCrash, playLand, disposeAudio } from './audio.js';
+import { tryAudioInit, updateAudio, playCheckpoint, playCrash, playExplosion, playLand, disposeAudio } from './audio.js';
 import { drawHUDStatic, drawHUDDynamic } from './hud.js';
 import { DronePhysics, DRONE_CLASSES } from './physics.js';
 import { BombManager } from './BombManager.js';
@@ -63,6 +63,7 @@ let lastTime = performance.now();
 let hudFrame = 0;
 let weatherParticles = null;
 let altHoldTarget = null;
+let bottomLightOverlayTimer = 0; // Таймер для OSD подсветки
 
 // ── Камера ────────────────────────────────────────────────────────────────────
 let cameraMode = 'fpv';
@@ -273,7 +274,7 @@ function animate() {
         droneGroup.position.copy(cameraTarget.position);
         droneGroup.rotation.copy(droneState.rotation);
 
-        if (cameraMode === 'fpv') {
+        if (cameraMode === 'fpv' || cameraMode === 'gov') {
             droneGroup.visible = false;
         } else if (droneState.turtleMode && hudFrame % 10 < 5) {
             droneGroup.visible = false;
@@ -286,33 +287,25 @@ function animate() {
         updateWeatherParticles(weatherParticles, delta, engineConfig.weather, droneState.position);
     }
 
-    if (cameraMode === 'third') {
-        _yawEuler.set(0, droneState.rotation.y, 0, 'YXZ'); _yawQuat.setFromEuler(_yawEuler);
-        const desiredPos = cameraTarget.position.clone().add(thirdPersonOffset.clone().applyQuaternion(_yawQuat));
-
-        if (!thirdPersonInited) {
-            cameraSmoothed.copy(desiredPos);
-            cameraLookSmoothed.copy(cameraTarget.position);
-            thirdPersonInited = true;
-        }
-
-        cameraSmoothed.lerp(desiredPos, 0.08);
-        cameraLookSmoothed.lerp(cameraTarget.position.clone().add(_tmpVec.set(0, 0.5, 0)), 0.12);
-        camera.position.copy(cameraSmoothed);
-        camera.lookAt(cameraLookSmoothed);
-    }
+    // Для GOV камеры нет необходимости расчитывать позицию от 3-го лица, так как она прикреплена к дрону
 
     updatePropellers(throttle, delta, droneState.isCrashed && !droneState.turtleMode);
     updateAudio(throttle, Math.abs(pitchInput) + Math.abs(rollInput) + Math.abs(yawInput), droneState.health < 40);
     updatePeople(delta);
     raceManager.update(delta, droneState, playCheckpoint, engineConfig);
-    if (bombManager) bombManager.update(delta, colliders, playCrash);
+    if (bombManager) bombManager.update(delta, colliders, playCrash, playExplosion);
     if (tutorialManager) tutorialManager.update(delta, raceManager);
 
-    // ════════════════════════════════════════════════════════════════════════
-    // НОВОЕ: ОБНОВЛЕНИЕ ПАРАМЕТРОВ ШЕЙДЕРА И РЕНДЕР
-    // ════════════════════════════════════════════════════════════════════════
-    if (fpvPass && cameraMode === 'fpv') {
+    if (gamepadState.justPressedSquare && bombManager) {
+        if (!bombManager.bomb.attached && !bombManager.bomb.dropped) {
+            bombManager.armBomb();
+        } else if (bombManager.bomb.attached) {
+            bombManager.dropBomb();
+            bottomLightOverlayTimer = 2.0;
+        }
+    }
+
+    if (fpvPass && (cameraMode === 'fpv' || cameraMode === 'gov')) {
         fpvPass.uniforms.time.value += delta;
 
         const speed = droneState.velocity.length();
@@ -364,6 +357,63 @@ function animate() {
     if (tutorialManager) {
         tutorialManager.draw(hudCtx, hudCanvas.width, hudCanvas.height);
     }
+
+    // ── OSD "Нижняя подсветка вкл" ──
+    if (bottomLightOverlayTimer > 0) {
+        bottomLightOverlayTimer -= delta;
+        if (hudCtx) {
+            const cx = hudCanvas.width / 2;
+            const cy = hudCanvas.height / 2;
+            const ow = 300; 
+            const oh = 140;
+            
+            hudCtx.save();
+            hudCtx.fillStyle = 'rgba(80, 80, 80, 0.5)';
+            hudCtx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            hudCtx.lineWidth = 1.5;
+            
+            hudCtx.beginPath();
+            hudCtx.roundRect(cx - ow / 2, cy - oh / 2, ow, oh, 16);
+            hudCtx.fill();
+            hudCtx.stroke();
+            
+            // Текст снизу (стандартный регистр, шрифт поменьше)
+            hudCtx.fillStyle = 'white';
+            hudCtx.font = '14px "JetBrains Mono", sans-serif';
+            hudCtx.textAlign = 'center';
+            hudCtx.textBaseline = 'bottom';
+            hudCtx.fillText('Нижняя подсветка вкл', cx, cy + oh/2 - 20);
+            
+            // Отрисовка белой монохромной иконки лампочки
+            const bulbY = cy - 20;
+            hudCtx.strokeStyle = 'white';
+            hudCtx.lineWidth = 2.5;
+            hudCtx.beginPath();
+            hudCtx.arc(cx, bulbY, 14, Math.PI * 0.75, Math.PI * 2.25);
+            hudCtx.lineTo(cx + 7, bulbY + 18);
+            hudCtx.lineTo(cx - 7, bulbY + 18);
+            hudCtx.closePath();
+            hudCtx.stroke();
+            
+            // Закрашенные элементы цоколя
+            hudCtx.fillStyle = 'white';
+            hudCtx.fillRect(cx - 6, bulbY + 21, 12, 4);
+            hudCtx.fillRect(cx - 4, bulbY + 27, 8, 4);
+            
+            // Лучи
+            hudCtx.lineWidth = 2;
+            const rayR1 = 20, rayR2 = 28;
+            for(let i=0; i<=4; i++) {
+                const angle = Math.PI + Math.PI/4 * i; // От 180° до 360°
+                hudCtx.beginPath();
+                hudCtx.moveTo(cx + Math.cos(angle)*rayR1, bulbY + Math.sin(angle)*rayR1);
+                hudCtx.lineTo(cx + Math.cos(angle)*rayR2, bulbY + Math.sin(angle)*rayR2);
+                hudCtx.stroke();
+            }
+            
+            hudCtx.restore();
+        }
+    }
 }
 
 export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStaticCanvas: hudStaticCanvasElement, infoElement: infoEl, config } = {}) {
@@ -402,6 +452,7 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
         vignette: config?.vignette ?? true,
         chromatic: config?.chromatic ?? true,
         glitch: config?.glitch ?? true,
+        cameraMode: config?.cameraMode ?? 'fpv',
     };
 
     scene.userData.weather = engineConfig.weather;
@@ -424,22 +475,34 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
 
     scene.add(cameraTarget);
 
-    camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
-    camera.rotation.x = THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG);
-    cameraTarget.add(camera);
+    cameraMode = engineConfig.cameraMode;
+
+    if (cameraMode === 'fpv') {
+        camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
+        camera.rotation.set(THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG), 0, 0);
+        cameraTarget.add(camera);
+    } else if (cameraMode === 'gov') {
+        camera.position.set(0, -0.15, 0); 
+        camera.rotation.set(-Math.PI / 2, 0, 0);
+        cameraTarget.add(camera);
+    } else {
+        scene.attach(camera);
+    }
 
     const onKeyDown = (e) => {
         pressedKeys.add(e.code);
         if (e.code === 'Tab') {
             e.preventDefault();
-            cameraMode = cameraMode === 'fpv' ? 'third' : 'fpv';
+            cameraMode = cameraMode === 'fpv' ? 'gov' : 'fpv';
             thirdPersonInited = false;
             if (cameraMode === 'fpv') {
                 cameraTarget.add(camera);
                 camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
                 camera.rotation.set(THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG), 0, 0);
-            } else {
-                scene.attach(camera);
+            } else if (cameraMode === 'gov') {
+                cameraTarget.add(camera);
+                camera.position.set(0, -0.15, 0); 
+                camera.rotation.set(-Math.PI / 2, 0, 0);
             }
         }
         if (e.code === 'KeyM') {
@@ -449,8 +512,12 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
             droneState.angularVelocity.set(0, 0, 0);
         }
         if (e.code === 'KeyN' && bombManager) {
-            if (!bombManager.bomb.attached && !bombManager.bomb.dropped) bombManager.armBomb();
-            else if (bombManager.bomb.attached) bombManager.dropBomb();
+            if (!bombManager.bomb.attached && !bombManager.bomb.dropped) {
+                bombManager.armBomb();
+            } else if (bombManager.bomb.attached) {
+                bombManager.dropBomb();
+                bottomLightOverlayTimer = 2.0;
+            }
         }
         if (e.code === 'KeyR' && (droneState.health <= 0 || droneState.turtleMode)) {
             if (gateObjects.length > 0) {

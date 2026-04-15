@@ -24,7 +24,10 @@ export const gamepadState = {
     yaw: 0,
     throttle: 0,
     arcadeMode: false,
+    justPressedSquare: false,
 };
+
+let _lastBtn2 = false;
 
 let _controllerType = 'gamepad';
 
@@ -313,6 +316,10 @@ function updateStateOnly() {
     gamepadState.pitch = norm.pitch;
     gamepadState.yaw = norm.yaw;
     gamepadState.throttle = norm.throttle;
+
+    const btn2 = gp.buttons[2]?.pressed || false;
+    gamepadState.justPressedSquare = btn2 && !_lastBtn2;
+    _lastBtn2 = btn2;
 
     if (infoElement) {
         infoElement.textContent = `${gamepadState.type.toUpperCase()}${gamepadState.arcadeMode ? ' [ARCADE]' : ''}`;

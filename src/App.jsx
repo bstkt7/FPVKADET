@@ -29,6 +29,7 @@ const DEFAULT_SETTINGS = {
     glitch: true,
     arcadeMode: false,
     quality: 'medium',
+    cameraMode: 'fpv',
     pid: null,
 };
 
