@@ -93,16 +93,13 @@ function normalizeAxes(gp) {
             throttle: (r2 - l2 + 1) / 2,
         };
     } else {
-        const rt = b[7]?.value ?? 0;
-        const lt = b[6]?.value ?? 0;
-        const throttle = (rt + lt) > 0.05
-            ? (rt - lt + 1) / 2
-            : (-dz(a[3] ?? 0) + 1) / 2;
+        // Mode 2: левый стик = газ (LY инв.) + рысканье (LX)
+        //          правый стик = pitch (RY инв.) + roll (RX)
         raw = {
-            roll: dzExpo(a[0] ?? 0),
-            pitch: -dzExpo(a[1] ?? 0),
-            yaw: dzExpo(a[2] ?? 0, 0.12, 0.35),
-            throttle,
+            yaw:      dzExpo(a[0] ?? 0, 0.12, 0.35),          // LX → рысканье
+            throttle: (-dz(a[1] ?? 0) + 1) / 2,               // LY инв. → газ 0..1
+            roll:     dzExpo(a[2] ?? 0),                       // RX → крен
+            pitch:    -dzExpo(a[3] ?? 0),                      // RY инв. → тангаж
         };
     }
 
@@ -328,8 +325,9 @@ function updateStateOnly() {
     const type = gamepadState.type;
     const accent = type === 'dualshock' ? '#00aaff' : type === 'xbox' ? '#00e664' : '#ffcc00';
 
-    const lx = dz(gp.axes[0] ?? 0);
-    const ly = -(dz(gp.axes[1] ?? 0));
+    // Визуализация: левый стик = yaw(X)/throttle(Y), правый = roll(X)/pitch(Y)
+    const lx = _controllerType === 'fpv' ? dz(gp.axes[2] ?? 0) : dz(gp.axes[0] ?? 0);
+    const ly = _controllerType === 'fpv' ? -(dz(gp.axes[3] ?? 0)) : -(dz(gp.axes[1] ?? 0));
     const rx = _controllerType === 'fpv' ? dz(gp.axes[0] ?? 0) : dz(gp.axes[2] ?? 0);
     const ry = _controllerType === 'fpv' ? -(dz(gp.axes[1] ?? 0)) : -(dz(gp.axes[3] ?? 0));
 

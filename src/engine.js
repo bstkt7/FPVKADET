@@ -80,6 +80,24 @@ let bombManager = null;
 let raceManager = new RaceManager();
 let tutorialManager = null;
 
+function applyCameraMode(nextMode) {
+    if (!camera || !cameraTarget || !scene) return;
+    cameraMode = nextMode;
+    thirdPersonInited = false;
+
+    if (cameraMode === 'fpv') {
+        cameraTarget.add(camera);
+        camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
+        camera.rotation.set(THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG), 0, 0);
+    } else if (cameraMode === 'gov') {
+        cameraTarget.add(camera);
+        camera.position.set(0, -0.15, 0);
+        camera.rotation.set(-Math.PI / 2, 0, 0);
+    } else {
+        scene.attach(camera);
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // НОВОЕ: КАСТОМНЫЙ FPV ШЕЙДЕР
 // ══════════════════════════════════════════════════════════════════════════════
@@ -318,24 +336,34 @@ function animate() {
         fpvPass.uniforms.vignetteStrength.value = baseVignette + speedEffect;
 
         // 2. CHROMATIC ABERRATION (Расслоение)
-        const baseChroma = engineConfig.chromatic ? 0.001 : 0.001;
-        const batChroma = engineConfig.chromatic ? (lowBatRatio * 0.008) : 0.0; // Сильно расслаивается при севшей батарее
+        const baseChroma = engineConfig.chromatic ? 0.001 : 0.0; // исправлен: был 0.001 в обоих ветках
+        const batChroma = engineConfig.chromatic ? (lowBatRatio * 0.008) : 0.0;
         const crashChroma = (engineConfig.chromatic && isCrashed) ? 0.02 : 0.0;
-        fpvPass.uniforms.chromaStrength.value = baseChroma + batChroma + crashChroma;
+        const chromaTotal = baseChroma + batChroma + crashChroma;
+        fpvPass.uniforms.chromaStrength.value = chromaTotal;
 
         // 3. GLITCH / NOISE (Помехи)
-        const baseGlitch = engineConfig.glitch ? 0.015 : 0.0; // Легкий фоновый шум
-        const batGlitch = engineConfig.glitch ? (lowBatRatio * 0.2) : 0.0; // Шум при разряде
-        const crashGlitch = (engineConfig.glitch && isCrashed) ? 1.0 : 0.0; // Экран рвется при аварии
-        fpvPass.uniforms.glitchStrength.value = baseGlitch + batGlitch + crashGlitch;
+        const baseGlitch = engineConfig.glitch ? 0.015 : 0.0;
+        const batGlitch = engineConfig.glitch ? (lowBatRatio * 0.2) : 0.0;
+        const crashGlitch = (engineConfig.glitch && isCrashed) ? 1.0 : 0.0;
+        const glitchTotal = baseGlitch + batGlitch + crashGlitch;
+        fpvPass.uniforms.glitchStrength.value = glitchTotal;
 
-        composer.render(); // Рендерим через постобработку
+        // Пропускаем EffectComposer если все эффекты незначительны → экономим RT-блит
+        const vigTotal = fpvPass.uniforms.vignetteStrength.value;
+        const needsPostFX = vigTotal > 0.05 || chromaTotal > 0.003 || glitchTotal > 0.01;
+        if (needsPostFX) {
+            composer.render();
+        } else {
+            renderer.render(scene, camera);
+        }
     } else {
-        // Если вид от 3-го лица — рендерим обычно, без FPV эффектов
+        // Вид от 3-го лица — обычный рендер без постобработки
         renderer.render(scene, camera);
     }
 
-    // ── HUD ──
+    // ── HUD (обновляем через кадр — 30 FPS достаточно для UI) ──
+    if (hudFrame % 2 !== 0) return;
     drawHUDDynamic(hudCanvas, hudCtx, hudFrame, engineConfig, {
         cameraMode,
         velocity: droneState.velocity,
@@ -422,7 +450,8 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
 
     renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: config?.quality === 'high' });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, config?.quality === 'high' ? 2 : 1.5));
+    // medium → 1.0, high → 1.5 (было 1.5/2 — слишком много пикселей)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, config?.quality === 'high' ? 1.5 : 1.0));
 
     // ════════════════════════════════════════════════════════════════════════
     // НОВОЕ: Инициализация EffectComposer
@@ -474,36 +503,13 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
     weatherParticles = createWeatherParticles(scene, scene.userData.weather);
 
     scene.add(cameraTarget);
-
-    cameraMode = engineConfig.cameraMode;
-
-    if (cameraMode === 'fpv') {
-        camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
-        camera.rotation.set(THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG), 0, 0);
-        cameraTarget.add(camera);
-    } else if (cameraMode === 'gov') {
-        camera.position.set(0, -0.15, 0); 
-        camera.rotation.set(-Math.PI / 2, 0, 0);
-        cameraTarget.add(camera);
-    } else {
-        scene.attach(camera);
-    }
+    applyCameraMode(engineConfig.cameraMode);
 
     const onKeyDown = (e) => {
         pressedKeys.add(e.code);
         if (e.code === 'Tab') {
             e.preventDefault();
-            cameraMode = cameraMode === 'fpv' ? 'gov' : 'fpv';
-            thirdPersonInited = false;
-            if (cameraMode === 'fpv') {
-                cameraTarget.add(camera);
-                camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
-                camera.rotation.set(THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG), 0, 0);
-            } else if (cameraMode === 'gov') {
-                cameraTarget.add(camera);
-                camera.position.set(0, -0.15, 0); 
-                camera.rotation.set(-Math.PI / 2, 0, 0);
-            }
+            applyCameraMode(cameraMode === 'fpv' ? 'gov' : 'fpv');
         }
         if (e.code === 'KeyM') {
             engineConfig.droneMode = engineConfig.droneMode === 'angle' ? 'sport'
@@ -613,5 +619,18 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
 export function updateEngineConfig(newConfig) {
     if (engineConfig) {
         engineConfig = { ...engineConfig, ...newConfig };
+
+        if (typeof newConfig?.fov === 'number' && camera) {
+            camera.fov = newConfig.fov;
+            camera.updateProjectionMatrix();
+        }
+
+        if (typeof newConfig?.controllerType === 'string') {
+            setControllerType(newConfig.controllerType);
+        }
+
+        if (typeof newConfig?.cameraMode === 'string' && newConfig.cameraMode !== cameraMode) {
+            applyCameraMode(newConfig.cameraMode);
+        }
     }
 }

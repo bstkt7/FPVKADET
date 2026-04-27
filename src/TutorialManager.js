@@ -16,6 +16,7 @@ export class TutorialManager {
         this.state = S.FADE_IN;
         this.alpha = 0;
         this.stepElapsed = 0;   // seconds since this step became ACTIVE
+        this.conditionHoldElapsed = 0; // seconds of continuous condition success
         this.completingT = 0;   // seconds in COMPLETING state
         this.pulseT = 0;
         this.arrowPulseT = 0;
@@ -69,9 +70,9 @@ export class TutorialManager {
                 keys: ['W', 'S'],
                 stick: { side: 'L', x: 0, y: 0.1 },
                 condition: () => d.position.y > 2 && d.position.y < 9 && d.velocity.length() < 2,
-                duration: 2,
+                holdDuration: 2,
                 objective: () => `Скорость: ${d.velocity.length().toFixed(1)} м/с (нужно < 2)`,
-                progressTarget: () => d.velocity.length() < 2 ? 1 : 0,
+                progressTarget: (tm) => Math.min(1, (tm.conditionHoldElapsed || 0) / 2),
             },
             {
                 id: 'pitch',
@@ -100,7 +101,7 @@ export class TutorialManager {
                 keys: ['A', 'D'],
                 stick: { side: 'L', x: 1, y: 0 },
                 condition: () => Math.abs(d.angularVelocity?.y ?? 0) > 0.5,
-                duration: 1.8,
+                holdDuration: 0.8,
                 objective: () => `Угловая скорость: ${Math.abs(d.angularVelocity?.y ?? 0).toFixed(2)}`,
                 progressTarget: () => Math.min(1, Math.abs(d.angularVelocity?.y ?? 0) / 0.5),
             },
@@ -201,6 +202,7 @@ export class TutorialManager {
         this.state = S.FADE_IN;
         this.alpha = 0;
         this.stepElapsed = 0;
+        this.conditionHoldElapsed = 0;
         this.completingT = 0;
     }
 
@@ -215,6 +217,8 @@ export class TutorialManager {
 
         const s = this.steps[this.currentStep];
         if (!s) { this.active = false; return; }
+
+        const crashed = this.droneState?.isCrashed && !this.droneState?.turtleMode;
 
         // Particles
         for (const p of this.particles) {
@@ -238,6 +242,9 @@ export class TutorialManager {
                 break;
 
             case S.ACTIVE:
+                // During crash we pause tutorial progress, but keep UI visible with hint.
+                if (crashed) break;
+
                 if (s.timerOnly) {
                     if (this.stepElapsed >= s.duration) {
                         if (s.isLast) { this.active = false; this._cleanup(); return; }
@@ -247,7 +254,12 @@ export class TutorialManager {
                     const done = s.id === 'gate'
                         ? s.condition(raceManager)
                         : (s.condition ? s.condition() : false);
-                    if (done && this.stepElapsed >= (s.duration ?? 0)) {
+
+                    if (done) this.conditionHoldElapsed += delta;
+                    else this.conditionHoldElapsed = 0;
+
+                    const holdDuration = s.holdDuration ?? 0;
+                    if (done && this.conditionHoldElapsed >= holdDuration) {
                         this._complete();
                     }
                 }
@@ -404,7 +416,7 @@ export class TutorialManager {
 
         // Progress bar (condition-based fill)
         if (s.progressTarget && this.state === S.ACTIVE) {
-            const prog = s.progressTarget();
+            const prog = s.progressTarget(this);
             const bx = px + 12, bw = 310, bh = 5, bY = py + PH - 20;
             ctx.fillStyle = 'rgba(255,255,255,0.08)';
             ctx.beginPath(); ctx.roundRect(bx, bY, bw, bh, 3); ctx.fill();
@@ -439,6 +451,14 @@ export class TutorialManager {
             ctx.font = '10px "JetBrains Mono", monospace';
             ctx.textAlign = 'right';
             ctx.fillText('[ESC] пропустить', px + PW - 10, py + PH - 8);
+        }
+
+        // Crash helper shown above panel.
+        if (this.droneState?.isCrashed && !this.droneState?.turtleMode && this.state === S.ACTIVE) {
+            ctx.fillStyle = 'rgba(255,90,90,0.92)';
+            ctx.font = 'bold 13px "JetBrains Mono", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('КРАШ! Нажмите [R] для рестарта', W / 2, py - 22);
         }
 
         ctx.restore();

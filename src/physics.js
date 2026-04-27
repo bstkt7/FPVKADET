@@ -444,7 +444,7 @@ export class DronePhysics {
         // ==== РЕАЛИСТИЧНЫЙ РЕЖИМ ====
         // Увеличиваем лимиты: в Angle — 45 градусов, в Sport — 95 градусов
         const tiltBase = cls.maxTiltDeg || 60;
-        const maxTilt = THREE.MathUtils.degToRad(tiltBase * (isSport ? 1.6 : 0.75));
+        const maxTilt = THREE.MathUtils.degToRad(tiltBase * (isSport ? 1.6 : 0.55)); // Angle: ~33° вместо 45°
 
         const { pitchBias, rollBias } = this._propAsymmetry();
 

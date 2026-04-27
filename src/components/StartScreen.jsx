@@ -93,7 +93,7 @@ function QuickConfigPanel({ settings, onChange }) {
         id === 'tiny_whoop' ? T.blue : id === 'heavy_sync' ? T.amber : T.accent;
 
     const weatherEmoji = key => ({ clear: '☀', overcast: '☁', rain: '🌧', storm: '⛈', snow: '❄', fog: '🌫', night: '🌙' })[key] || '';
-    const mapEmoji = key => ({ warehouse: '🏭', city: '🏙', forest: '🌲', desert: '🏜', stadium: '🏟', rooftop: '🏢', canyon: '🏔', underground: '⛏' })[key] || '';
+    const mapEmoji = key => ({ hangar: '🏢', open_field: '🌲', city_run: '🏙' })[key] || '';
 
     return (
         <div style={{
@@ -233,12 +233,12 @@ export function StartScreen({ settings, gpConnected, gpLabel, onStart, onStartTu
     const classLabel = DRONE_CLASS_LABELS;
 
     return (
-        <div style={{
-            position: 'fixed', inset: 0, zIndex: 100,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: T.bg,
-            overflow: 'hidden',
-        }}>
+<div style={{
+    position: 'fixed', inset: 0, zIndex: 100,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: `${T.bg} url('/assets/images/bg.png') center/cover no-repeat`,
+    overflow: 'hidden',
+}}>
             {/* Background grid */}
             <div style={{
                 position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0,
@@ -399,8 +399,9 @@ export function StartScreen({ settings, gpConnected, gpLabel, onStart, onStartTu
                         <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
                             {[
                                 { label: 'ИНСТРУКЦИЯ', color: T.blue, bg: T.blueDim, action: onShowInstr },
+                                { label: 'НАСТРОЙКИ', color: T.amber, bg: T.amberDim, action: onShowSettings },
                                 { label: 'РЕКОРДЫ', color: T.accent, bg: T.accent + '22', action: onShowLeaderboard },
-                                { label: 'РЕДАКТОР', color: T.amber, bg: T.amberDim, action: () => window.open('/map-editor.html', '_blank') },
+                                { label: 'РЕДАКТОР', color: '#ff7cc8', bg: 'rgba(255,124,200,0.16)', action: () => window.open(`/map-editor.html?rings=1&map=${encodeURIComponent(settings.map)}`, '_blank') },
                             ].map(({ label, color, bg, action }) => (
                                 <button
                                     key={label}

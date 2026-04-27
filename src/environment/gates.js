@@ -171,6 +171,29 @@ const TRACK_DATA = {
     ],
 };
 
+const TRACK_OVERRIDE_KEY = 'fpv_track_overrides';
+
+function getRuntimeTrackData(mapType) {
+    const defaults = TRACK_DATA[mapType];
+    if (!defaults || typeof window === 'undefined') return defaults;
+    try {
+        const raw = window.localStorage.getItem(TRACK_OVERRIDE_KEY);
+        if (!raw) return defaults;
+        const parsed = JSON.parse(raw);
+        const gates = parsed?.[mapType]?.gates;
+        if (!Array.isArray(gates) || gates.length === 0) return defaults;
+        return gates.map(g => ({
+            x: Number(g.x) || 0,
+            y: Number(g.y) || 0,
+            z: Number(g.z) || 0,
+            color: Number(g.color) || 0x00ccff,
+            rotY: Number(g.rotY) || 0,
+        }));
+    } catch (e) {
+        return defaults;
+    }
+}
+
 // ── Строитель трассы ──────────────────────────────────────────────────────────
 export function buildTrack(scene, colliders, gateObjects) {
     gateObjects.length = 0;
@@ -218,7 +241,7 @@ export function buildTrack(scene, colliders, gateObjects) {
         createUHangar(scene, colliders, 0, 0, 0);
     }
 
-    const gatesData = TRACK_DATA[mapType] || TRACK_DATA.hangar;
+    const gatesData = getRuntimeTrackData(mapType) || TRACK_DATA.hangar;
     gatesData.forEach(g => createGate(scene, gateObjects, g.x, g.y, g.z, g.color, g.rotY));
 
     // ── Линия трассы (потолще: тонкий TubeGeometry, квадратное сечение) ──────
