@@ -1,38 +1,38 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-// НОВОЕ: Импортируем updateEngineConfig
-import { initEngine, updateEngineConfig } from './engine.js';
+import { initEngine } from './engine.js';
 import { initGamepadVisualizer, gamepadState } from './gamepad.js';
 import { tryAudioInit } from './audio.js';
 import { globalStyles } from './styles/global.js';
 import { InstructionModal } from './components/modals/InstructionModal.jsx';
-import { SettingsModal } from './components/modals/SettingsModal.jsx';
-import { InGameButtons } from './components/GameOverlay.jsx';
-import { StartScreen } from './components/StartScreen.jsx';
+import { SettingsModal }    from './components/modals/SettingsModal.jsx';
+import { InGameButtons }    from './components/GameOverlay.jsx';
+import { StartScreen }      from './components/StartScreen.jsx';
 import { LeaderboardModal } from './components/modals/LeaderboardModal.jsx';
-import { DRONE_CLASSES } from './physics.js';
+import { DRONE_CLASSES }    from './physics.js';
 
 // ── Дефолтные настройки ───────────────────────────────────────────────────────
+// Используем defaultPID прямо из DRONE_CLASSES (единственный источник истины)
 const DEFAULT_SETTINGS = {
-    playerName: 'СпидиГонщик',
-    droneClass: 'freestyle_5',
-    droneMode: 'angle',
-    flightMode: 'medium',
+    playerName:     'СпидиГонщик',
+    droneClass:     'freestyle_5',
+    droneMode:      'angle',
+    flightMode:     'medium',
     controllerType: 'gamepad',
-    map: 'hangar',
-    weather: 'clear',
-    fov: 90,
-    sensitivity: 5,
+    map:            'hangar',
+    weather:        'clear',
+    fov:            90,
+    sensitivity:    5,
     groundFriction: 5,
-    invertPitch: false,
-    vignette: true,
-    chromatic: true,
-    glitch: true,
-    arcadeMode: false,
-    quality: 'medium',
-    cameraMode: 'fpv',
-    pid: null,
+    invertPitch:    false,
+    vignette:       true,
+    chromatic:      true,
+    glitch:         true,
+    arcadeMode:     false,
+    quality:        'medium',
+    pid:            null,   // null = брать из DRONE_CLASSES[droneClass].defaultPID
 };
 
+/** Загрузить настройки из localStorage, смержить с DEFAULT_SETTINGS */
 function loadSettings() {
     try {
         const saved = localStorage.getItem('fpv_settings');
@@ -45,54 +45,44 @@ function saveSettings(s) {
     try { localStorage.setItem('fpv_settings', JSON.stringify(s)); } catch (e) { /* ignore */ }
 }
 
+// ── Главный компонент ─────────────────────────────────────────────────────────
 export default function App() {
-    const [settings, setSettings] = useState(loadSettings);
-    const [started, setStarted] = useState(false);
-    const [showInstr, setShowInstr] = useState(false);
+    const [settings,     setSettings    ] = useState(loadSettings);
+    const [started,      setStarted     ] = useState(false);
+    const [showInstr,    setShowInstr   ] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
-    const [showLb, setShowLb] = useState(false);
-    const [gpLabel, setGpLabel] = useState('НЕТ');
-    const [gpConnected, setGpConnected] = useState(false);
+    const [showLb,       setShowLb      ] = useState(false);
+    const [gpLabel,      setGpLabel     ] = useState('НЕТ');
+    const [gpConnected,  setGpConnected ] = useState(false);
 
-    const threeRef = useRef(null);
-    const hudRef = useRef(null);
+    const threeRef    = useRef(null);
+    const hudRef      = useRef(null);
     const hudStaticRef = useRef(null);
     const gpCanvasRef = useRef(null);
-    const gpInfoRef = useRef(null);
-    const audioRef = useRef(null);
-    const disposeRef = useRef(null);
+    const gpInfoRef   = useRef(null);
+    const audioRef    = useRef(null);
+    const disposeRef  = useRef(null);  // хранит dispose() от initEngine
 
-    // ── НОВОЕ: Изменение настройки "На лету" ──────────────────────────────────
+    // ── Изменение настройки ───────────────────────────────────────────────────
     const changeSetting = useCallback((key, val) => {
         setSettings(prev => {
             const next = { ...prev, [key]: val };
             saveSettings(next);
-
-            // Отправляем новые настройки прямиком в запущенный 3D-движок!
-            updateEngineConfig(next);
-
             return next;
         });
     }, []);
 
     // ── Геймпад-пульс ─────────────────────────────────────────────────────────
     useEffect(() => {
-        const update = () => {
+        const id = setInterval(() => {
             setGpConnected(gamepadState.connected);
             if (gamepadState.connected) {
-                setGpLabel(gamepadState.type.toUpperCase());
+                setGpLabel(gamepadState.id.substring(0, 20) || 'OK');
             } else {
                 setGpLabel('НЕТ');
             }
-        };
-        const id = setInterval(update, 200);
-        window.addEventListener('gamepadconnected', update);
-        window.addEventListener('gamepaddisconnected', update);
-        return () => {
-            clearInterval(id);
-            window.removeEventListener('gamepadconnected', update);
-            window.removeEventListener('gamepaddisconnected', update);
-        };
+        }, 500);
+        return () => clearInterval(id);
     }, []);
 
     // ── Фоновая музыка меню ───────────────────────────────────────────────────
@@ -102,16 +92,16 @@ export default function App() {
             return;
         }
         const audio = new Audio('/assets/sounds/soundtrack.mp3');
-        audio.loop = true;
+        audio.loop   = true;
         audio.volume = 0.25;
         audio.onerror = () => { audioRef.current = null; };
         audioRef.current = audio;
-        const play = () => audio.play().catch(() => { });
+        const play = () => audio.play().catch(() => {});
         document.addEventListener('pointerdown', play, { once: true });
-        document.addEventListener('keydown', play, { once: true });
+        document.addEventListener('keydown',     play, { once: true });
         return () => {
             document.removeEventListener('pointerdown', play);
-            document.removeEventListener('keydown', play);
+            document.removeEventListener('keydown',     play);
             audio.pause(); audio.src = '';
         };
     }, [started]);
@@ -126,20 +116,21 @@ export default function App() {
     useEffect(() => {
         if (!started) return;
 
-        const cls = DRONE_CLASSES[settings.droneClass] || DRONE_CLASSES['freestyle_5'];
-        const pid = (settings.pid && settings.pid._fromClass === settings.droneClass)
+        // Подготовить PID из настроек или дефолт из DRONE_CLASSES
+        const cls   = DRONE_CLASSES[settings.droneClass] || DRONE_CLASSES['freestyle_5'];
+        const pid   = (settings.pid && settings.pid._fromClass === settings.droneClass)
             ? settings.pid
             : cls.defaultPID;
 
         const dispose = initEngine({
-            threeCanvas: threeRef.current,
-            hudCanvas: hudRef.current,
+            threeCanvas:  threeRef.current,
+            hudCanvas:    hudRef.current,
             hudStaticCanvas: hudStaticRef.current,
-            infoElement: gpInfoRef.current,
+            infoElement:  gpInfoRef.current,
             config: {
                 ...settings,
-                fov: settings.fov,
-                sensitivity: settings.sensitivity,
+                fov:          settings.fov,
+                sensitivity:  settings.sensitivity,
                 groundFriction: settings.groundFriction,
                 pid,
             },
@@ -170,7 +161,8 @@ export default function App() {
 
     const handleStartTutorial = useCallback(() => {
         tryAudioInit();
-        setSettings(prev => ({ ...prev, map: 'tutorial' }));
+        // Временно форсируем настройки для туториала
+        setSettings(prev => ({ ...prev, map: 'tutorial' })); 
         setStarted(true);
     }, []);
 
@@ -179,6 +171,7 @@ export default function App() {
         <>
             <style>{globalStyles}</style>
 
+            {/* Three.js canvas */}
             <canvas
                 ref={threeRef}
                 id="threeCanvas"
@@ -190,6 +183,7 @@ export default function App() {
                 }}
             />
 
+            {/* HUD canvas (Dynamic) */}
             <canvas
                 ref={hudRef}
                 id="interface"
@@ -202,6 +196,7 @@ export default function App() {
                 }}
             />
 
+            {/* HUD layer (Static) */}
             <canvas
                 ref={hudStaticRef}
                 id="static-interface"
@@ -214,6 +209,7 @@ export default function App() {
                 }}
             />
 
+            {/* Геймпад-визуализатор */}
             {started && (
                 <div className="gamepad-info" style={{
                     position: 'fixed', bottom: 10, left: '50%',
@@ -235,6 +231,7 @@ export default function App() {
                 </div>
             )}
 
+            {/* Вспышка по экрану при старте */}
             {!started && (
                 <StartScreen
                     settings={settings}
@@ -245,10 +242,10 @@ export default function App() {
                     onShowInstr={() => setShowInstr(true)}
                     onShowSettings={() => setShowSettings(true)}
                     onShowLeaderboard={() => setShowLb(true)}
-                    onChange={changeSetting}
                 />
             )}
 
+            {/* Кнопки внутри игры */}
             {started && (
                 <InGameButtons
                     onShowInstr={() => setShowInstr(true)}
@@ -257,6 +254,7 @@ export default function App() {
                 />
             )}
 
+            {/* Модалки */}
             {showInstr && (
                 <InstructionModal onClose={() => setShowInstr(false)} />
             )}

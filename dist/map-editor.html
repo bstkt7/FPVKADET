@@ -668,6 +668,12 @@
     <div id="topbar">
       <span class="topbar-title">FPV MAP EDITOR</span>
       <div class="topbar-sep"></div>
+      <select id="map-select" class="topbar-btn" onchange="changeMap(this.value)">
+        <option value="hangar">Ангар</option>
+        <option value="open_field">Поле</option>
+        <option value="city_run">Город</option>
+      </select>
+      <button class="topbar-btn" onclick="saveMapToGame()">Сохранить в игру</button>
       <span class="topbar-info" id="status">Нет объектов</span>
       <div class="topbar-sep"></div>
       <span class="topbar-info" id="sel-info">Ничего не выбрано</span>
@@ -816,6 +822,46 @@
     let undoStack = [];
     let redoStack = [];
     let objCounter = 0;
+    const query = new URLSearchParams(window.location.search);
+    const ringsOnlyMode = query.get('rings') === '1';
+    const TRACK_OVERRIDE_KEY = 'fpv_track_overrides';
+    let currentMap = query.get('map') || 'hangar';
+    const DEFAULT_TRACK_GATES = {
+      open_field: [
+        { x: 0, y: 10, z: -5, color: 0x00ccff, rotY: 1.571 },
+        { x: 0, y: 12, z: 40, color: 0xff6600, rotY: 1.571 },
+        { x: 0, y: 14, z: 90, color: 0xff6600, rotY: 2.149 },
+        { x: 40, y: 12, z: 120, color: 0x00ccff, rotY: -0.245 },
+        { x: 90, y: 10, z: 110, color: 0xff6600, rotY: -1.03 },
+        { x: 120, y: 18, z: 60, color: 0xff6600, rotY: -1.768 },
+        { x: 110, y: 25, z: 10, color: 0x00ccff, rotY: -2.222 },
+        { x: 70, y: 20, z: -30, color: 0xff6600, rotY: -2.201 },
+        { x: 30, y: 14, z: -60, color: 0xff6600, rotY: -2.554 },
+        { x: 0, y: 10, z: -80, color: 0x00ff88, rotY: -2.356 },
+        { x: -30, y: 14, z: -50, color: 0xff6600, rotY: -1.373 },
+        { x: -20, y: 10, z: -5, color: 0x00ff88, rotY: 0.245 },
+      ],
+      city_run: [
+        { x: -50, y: 15, z: 0, color: 0x00ff88, rotY: 0 },
+        { x: 0, y: 25, z: 100, color: 0xff00ff, rotY: 0.5 },
+        { x: 100, y: 15, z: 50, color: 0x00ffff, rotY: 1.5 },
+        { x: 50, y: 10, z: -100, color: 0xffff00, rotY: 3.14 },
+      ],
+      hangar: [
+        { x: 0, y: 6, z: -45, color: 0x00e6ff, rotY: 1.571 },
+        { x: 0, y: 6, z: -15, color: 0x00ccff, rotY: 1.571 },
+        { x: 0, y: 6, z: 15, color: 0x00ccff, rotY: 1.571 },
+        { x: 0, y: 6, z: 45, color: 0x00e6ff, rotY: 1.571 },
+        { x: 60, y: 8, z: 80, color: 0x00ffcc, rotY: 0.785 },
+        { x: 110, y: 12, z: 60, color: 0xff6600, rotY: 1.571 },
+        { x: 130, y: 16, z: 0, color: 0xff6600, rotY: 1.571 },
+        { x: 110, y: 12, z: -60, color: 0xff6600, rotY: 2.356 },
+        { x: 60, y: 8, z: -90, color: 0x00ffcc, rotY: 3.142 },
+        { x: -10, y: 10, z: -95, color: 0xffcc00, rotY: 3.142 },
+        { x: -60, y: 8, z: -80, color: 0xff3344, rotY: -2.356 },
+        { x: -30, y: 6, z: -62, color: 0x00ffcc, rotY: -1.571 },
+      ],
+    };
 
     // ── Orbit camera state ────────────────────────────────────────────────────────
     const orbit = { theta: 0.5, phi: 1.0, radius: 100, target: new THREE.Vector3() };
@@ -1249,8 +1295,108 @@
     };
 
     function updateStatus() {
-      document.getElementById('status').textContent = `Объектов: ${objects.length}`;
+      document.getElementById('status').textContent = `Карта: ${currentMap} | Объектов: ${objects.length}`;
     }
+
+    function applyRingsOnlyMode() {
+      if (!ringsOnlyMode) return;
+
+      document.querySelector('.topbar-title').textContent = 'FPV RING EDITOR';
+      const hint = document.getElementById('gizmo-hint');
+      if (hint) {
+        hint.textContent = 'Режим колец: добавляй, двигай и поворачивай кольца. Экспорт сразу готов для трассы.';
+      }
+
+      document.querySelectorAll('.tool-btn[onclick^="spawnObject"]').forEach(btn => {
+        if (!btn.getAttribute('onclick').includes("'gate'")) btn.style.display = 'none';
+      });
+
+      const moveBtn = document.querySelector('.tool-btn[data-tool="move"]');
+      const rotateBtn = document.querySelector('.tool-btn[data-tool="rotate"]');
+      if (moveBtn) moveBtn.click();
+      if (rotateBtn) rotateBtn.style.display = '';
+
+      const tbScale = document.getElementById('tb-scale');
+      if (tbScale) tbScale.style.display = 'none';
+      const tbLocal = document.getElementById('tb-local');
+      if (tbLocal) tbLocal.style.display = 'none';
+    }
+
+    function getTrackOverrides() {
+      try {
+        const raw = localStorage.getItem(TRACK_OVERRIDE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function setTrackOverrides(next) {
+      localStorage.setItem(TRACK_OVERRIDE_KEY, JSON.stringify(next));
+    }
+
+    function clearSceneObjects() {
+      objects.forEach(o => scene.remove(o.mesh));
+      objects = [];
+      selectedObj = null;
+      objCounter = 0;
+      refreshObjList();
+      refreshProps();
+      updateStatus();
+      document.getElementById('sel-info').textContent = 'Ничего не выбрано';
+    }
+
+    function spawnGateFromData(g) {
+      const id = ++objCounter;
+      const colorHex = (Number(g.color) || 0x00ccff).toString(16).padStart(6, '0');
+      const data = { innerR: 4.5, tubeR: 0.45, color: '#' + colorHex };
+      const mesh = buildMesh('gate', data);
+      mesh.position.set(Number(g.x) || 0, Number(g.y) || 0, Number(g.z) || 0);
+      mesh.rotation.y = Number(g.rotY) || 0;
+      scene.add(mesh);
+      objects.push({ id, type: 'gate', mesh, data, name: `Кольцо ${id}`, visible: true });
+    }
+
+    function serializeCurrentGates() {
+      return objects
+        .filter(o => o.type === 'gate')
+        .map(o => ({
+          x: +o.mesh.position.x.toFixed(2),
+          y: +o.mesh.position.y.toFixed(2),
+          z: +o.mesh.position.z.toFixed(2),
+          color: parseInt((o.data.color || '#00ccff').replace('#', '0x'), 16),
+          rotY: +o.mesh.rotation.y.toFixed(4),
+        }));
+    }
+
+    function loadMapIntoEditor(mapName) {
+      const defaults = DEFAULT_TRACK_GATES[mapName] || DEFAULT_TRACK_GATES.hangar;
+      const overrides = getTrackOverrides();
+      const source = Array.isArray(overrides?.[mapName]?.gates) && overrides[mapName].gates.length
+        ? overrides[mapName].gates
+        : defaults;
+
+      clearSceneObjects();
+      source.forEach(spawnGateFromData);
+      refreshObjList();
+      updateStatus();
+    }
+
+    window.changeMap = function (mapName) {
+      currentMap = mapName;
+      const mapSelect = document.getElementById('map-select');
+      if (mapSelect) mapSelect.value = mapName;
+      loadMapIntoEditor(mapName);
+    };
+
+    window.saveMapToGame = function () {
+      const overrides = getTrackOverrides();
+      overrides[currentMap] = { gates: serializeCurrentGates() };
+      setTrackOverrides(overrides);
+      updateStatus();
+      alert(`Карта "${currentMap}" сохранена. Игра подхватит изменения при следующем запуске трассы.`);
+    };
 
     // ── Properties panel ──────────────────────────────────────────────────────────
     function refreshProps() {
@@ -1567,7 +1713,10 @@
       if (e.key === 'o' || e.key === 'O') setCamMode('orbit');
       if (e.key === 'f' || e.key === 'F') setCamMode('fly');
 
-      if (KEY_SPAWNS[e.key]) spawnObject(KEY_SPAWNS[e.key]);
+      if (KEY_SPAWNS[e.key]) {
+        const spawnType = KEY_SPAWNS[e.key];
+        if (!ringsOnlyMode || spawnType === 'gate') spawnObject(spawnType);
+      }
       if (e.key === 'Home') resetView();
 
       flyKeys[e.key.toLowerCase()] = true;
@@ -1588,6 +1737,7 @@
             rotY: +r.y.toFixed(4),
           });
         } else {
+          if (ringsOnlyMode) return;
           obs.push({
             type: o.type, name: o.name,
             x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
@@ -1598,7 +1748,7 @@
         }
       });
 
-      const out = { gates, objects: obs };
+      const out = ringsOnlyMode ? { gates } : { gates, objects: obs };
       document.getElementById('export-ta').value = JSON.stringify(out, null, 2);
       document.getElementById('export-modal').style.display = 'flex';
     };
@@ -1632,7 +1782,8 @@
           objects.push({ id, type: 'gate', mesh, data, name: `Кольцо ${id}`, visible: true });
         });
 
-        (json.objects || []).forEach(o => {
+        if (!ringsOnlyMode) {
+          (json.objects || []).forEach(o => {
           const id = ++objCounter;
           const mesh = buildMesh(o.type, o.data);
           mesh.position.set(o.x, o.y, o.z);
@@ -1640,7 +1791,8 @@
           mesh.scale.set(o.sx, o.sy, o.sz);
           scene.add(mesh);
           objects.push({ id, type: o.type, mesh, data: o.data, name: o.name || `${o.type} ${id}`, visible: true });
-        });
+          });
+        }
 
         selectObj(null);
         refreshObjList(); updateStatus();
@@ -1654,10 +1806,7 @@
       if (!objects.length) return;
       if (!confirm('Очистить все объекты?')) return;
       pushUndo();
-      objects.forEach(o => scene.remove(o.mesh));
-      objects = [];
-      selectObj(null);
-      refreshObjList(); updateStatus();
+      clearSceneObjects();
     };
 
     // ══════════════════════════════════════════════════════════════════════════════
@@ -1713,6 +1862,12 @@
     applyCameraOrbit();
 
     // init
+    applyRingsOnlyMode();
+    const mapSelect = document.getElementById('map-select');
+    if (mapSelect && !DEFAULT_TRACK_GATES[currentMap]) currentMap = 'hangar';
+    if (mapSelect) mapSelect.value = currentMap;
+    loadMapIntoEditor(currentMap);
+    if (ringsOnlyMode) setTool('move');
     updateStatus();
   </script>
 </body>

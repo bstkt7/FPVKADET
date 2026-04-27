@@ -128,7 +128,7 @@ export class BombManager {
         }
     }
 
-    update(delta, colliders, playCrash, playExplosion) {
+    update(delta, colliders, playCrash) {
         // ── Обновление частиц ──
         for (let i = this.bomb.particles.length - 1; i >= 0; i--) {
             const p = this.bomb.particles[i];
@@ -192,8 +192,7 @@ export class BombManager {
                 this.scene.remove(this.bomb.mesh);
                 this.bomb.mesh = null;
                 this.spawnExplosion(this.bomb.position.clone());
-                if (playExplosion) playExplosion();
-                else if (playCrash) playCrash();
+                if (playCrash) playCrash();
             }
         }
     }
