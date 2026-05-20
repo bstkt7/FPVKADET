@@ -9,6 +9,7 @@ let currentPlaybackRate = 1.0;
 let checkpointBuffer = null;
 let crashBuffer = null;
 let landBuffer = null;
+let explosionBuffer = null;
 
 async function loadBuffer(url) {
     try {
@@ -36,8 +37,7 @@ export async function initAudio() {
 
     audioBuffer     = await loadBuffer('./assets/sounds/quad.mp3');
     checkpointBuffer= await loadBuffer('./assets/sounds/checkpoint.mp3');
-    crashBuffer     = await loadBuffer('./assets/sounds/crash.mp3');
-    landBuffer      = await loadBuffer('./assets/sounds/land.mp3');
+    explosionBuffer = await loadBuffer('./assets/sounds/big-bang.mp3');
 
     if (audioBuffer) startAudioLoop();
 }
@@ -73,6 +73,15 @@ export function playCrash() {
     gain.gain.setValueAtTime(0.7, audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.35);
     osc.start(); osc.stop(audioCtx.currentTime + 0.35);
+}
+
+export function playExplosion() {
+    if (explosionBuffer) {
+        playSFX(explosionBuffer, 1.2);
+        return;
+    }
+    // Если файла нет, используем звук краша как запасной
+    playCrash();
 }
 
 export function playLand(impact) {

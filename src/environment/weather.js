@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 
 // ── Погодные частицы ──────────────────────────────────────────────────────────
-export function createWeatherParticles(scene, weather) {
+export function createWeatherParticles(scene, weather, quality = 'medium') {
     if (weather === 'clear') return null;
-    const count = weather === 'rain' ? 4000 : 2500;
+    const mult = quality === 'low' ? 0.35 : quality === 'medium' ? 0.65 : 1;
+    const count = Math.floor((weather === 'rain' ? 4000 : 2500) * mult);
     const geo   = new THREE.BufferGeometry();
     const pos   = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {

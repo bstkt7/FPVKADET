@@ -43,7 +43,7 @@ export const CONTROLLER_TYPE_LABELS = {
 };
 
 export const QUALITY_LABELS = {
-    low:    'Низкое',
+    low:    'Низкое — цель 40–60 FPS',
     medium: 'Среднее',
     high:   'Высокое',
 };

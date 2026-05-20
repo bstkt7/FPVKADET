@@ -91,7 +91,10 @@ export function createSky(config) {
         depthWrite: false,
     });
 
-    return new THREE.Mesh(new THREE.SphereGeometry(700, 32, 16), skyMat);
+    const q = config?.quality || 'medium';
+    const wSeg = q === 'low' ? 16 : q === 'medium' ? 24 : 32;
+    const hSeg = q === 'low' ? 8 : q === 'medium' ? 12 : 16;
+    return new THREE.Mesh(new THREE.SphereGeometry(700, wSeg, hSeg), skyMat);
 }
 
 export function createSunAndLighting(sc, config) {

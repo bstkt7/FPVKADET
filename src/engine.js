@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+
+// ── НОВОЕ: Импорты для Постобработки ──────────────────────────────────────────
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+
 import { gamepadState, setControllerType, destroyGamepadVisualizer } from './gamepad.js';
 
 import {
@@ -8,7 +14,7 @@ import {
     buildTrack, createWeatherParticles, updateWeatherParticles,
     createUHangar, updatePeople
 } from './environment/index.js';
-import { tryAudioInit, updateAudio, playCheckpoint, playCrash, playLand, disposeAudio } from './audio.js';
+import { tryAudioInit, updateAudio, playCheckpoint, playCrash, playExplosion, playLand, disposeAudio } from './audio.js';
 import { drawHUDStatic, drawHUDDynamic } from './hud.js';
 import { DronePhysics, DRONE_CLASSES } from './physics.js';
 import { BombManager } from './BombManager.js';
@@ -19,6 +25,8 @@ import { GRAVITY, GRAVITY_SNOW, BOMB_GRAVITY, GROUND_Y, SPAWN_POS, FPV_CAM_OFFSE
 let scene;
 let camera;
 let renderer;
+let composer; // НОВОЕ: Композер эффектов
+let fpvPass;  // НОВОЕ: Наш кастомный шейдер FPV
 
 let infoElement = null;
 
@@ -28,14 +36,13 @@ let engineConfig = {
     flightMode: 'medium',
     controllerType: 'gamepad',
     droneMode: 'angle',
+    vignette: true,
+    chromatic: true,
+    glitch: true,
 };
 
 // ── Физика и Дрон ─────────────────────────────────────────────────────────────
-// DronePhysics принимает аудио колбэки — нет прямой зависимости physics ↔ audio
-const droneState = new DronePhysics({
-    onCrash: playCrash,
-    onLand: playLand,
-});
+let droneState = null;
 
 let cameraTarget = new THREE.Object3D();
 let hudCanvas = null;
@@ -52,7 +59,29 @@ const thirdPersonOffset = new THREE.Vector3(THIRD_PERSON_OFFSET.x, THIRD_PERSON_
 let lastTime = performance.now();
 let hudFrame = 0;
 let weatherParticles = null;
+
+// FPS counter
+let fpsAccum = 0;
+let fpsFrames = 0;
+let fpsDisplay = 60;
+
+const QUALITY_PROFILES = {
+    low:    { pixelRatio: 0.75, postFX: false, hudInterval: 3, disableFx: true },
+    medium: { pixelRatio: 1.0,  postFX: true,  hudInterval: 2, disableFx: false },
+    high:   { pixelRatio: 1.5,  postFX: true,  hudInterval: 2, disableFx: false },
+};
+
+function getQualityProfile() {
+    return QUALITY_PROFILES[engineConfig.quality] || QUALITY_PROFILES.medium;
+}
+
+function applyRendererQuality(quality) {
+    if (!renderer) return;
+    const profile = QUALITY_PROFILES[quality] || QUALITY_PROFILES.medium;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, profile.pixelRatio));
+}
 let altHoldTarget = null;
+let bottomLightOverlayTimer = 0; // Таймер для OSD подсветки
 
 // ── Камера ────────────────────────────────────────────────────────────────────
 let cameraMode = 'fpv';
@@ -69,8 +98,98 @@ let bombManager = null;
 let raceManager = new RaceManager();
 let tutorialManager = null;
 
+function applyCameraMode(nextMode) {
+    if (!camera || !cameraTarget || !scene) return;
+    cameraMode = nextMode;
+    thirdPersonInited = false;
 
+    if (cameraMode === 'fpv') {
+        cameraTarget.add(camera);
+        camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
+        camera.rotation.set(THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG), 0, 0);
+    } else if (cameraMode === 'gov') {
+        cameraTarget.add(camera);
+        camera.position.set(0, -0.15, 0);
+        camera.rotation.set(-Math.PI / 2, 0, 0);
+    } else {
+        scene.attach(camera);
+    }
+}
 
+// ══════════════════════════════════════════════════════════════════════════════
+// НОВОЕ: КАСТОМНЫЙ FPV ШЕЙДЕР
+// ══════════════════════════════════════════════════════════════════════════════
+const FPVShader = {
+    uniforms: {
+        "tDiffuse": { value: null },
+        "time": { value: 0.0 },
+        "vignetteStrength": { value: 0.0 },
+        "chromaStrength": { value: 0.0 },
+        "glitchStrength": { value: 0.0 },
+        "resolution": { value: new THREE.Vector2() }
+    },
+    vertexShader: `
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    `,
+    fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform float time;
+        uniform float vignetteStrength;
+        uniform float chromaStrength;
+        uniform float glitchStrength;
+        uniform vec2 resolution;
+
+        varying vec2 vUv;
+
+        // Генератор случайных чисел для шума
+        float rand(vec2 co) {
+            return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+        }
+
+        void main() {
+            vec2 uv = vUv;
+            
+            // ── GLITCH (Полосы и разрывы кадра при краше) ──
+            if (glitchStrength > 0.0) {
+                float scanline = sin(uv.y * resolution.y * 0.4) * 0.04 * glitchStrength;
+                uv.x += scanline;
+                
+                // Крупные разрывы (tearing) при сильном глитче
+                if (glitchStrength > 0.5) {
+                    float tear = step(0.9, sin(uv.y * 20.0 + time * 15.0));
+                    uv.x += tear * (rand(vec2(time, uv.y)) - 0.5) * 0.1 * glitchStrength;
+                }
+            }
+
+            // ── CHROMA (Расслоение цветов RGB) ──
+            vec2 offset = vec2(chromaStrength, 0.0);
+            
+            float r = texture2D(tDiffuse, uv + offset).r;
+            float g = texture2D(tDiffuse, uv).g;
+            float b = texture2D(tDiffuse, uv - offset).b;
+            vec4 texColor = vec4(r, g, b, 1.0);
+
+            // ── STATIC NOISE (Аналоговый шум камеры) ──
+            if (glitchStrength > 0.0) {
+                float noise = (rand(uv + time) - 0.5) * 0.3 * glitchStrength;
+                texColor.rgb += noise;
+            }
+
+            // ── VIGNETTE (Туннельное зрение / Затенение краев) ──
+            if (vignetteStrength > 0.0) {
+                float dist = distance(vUv, vec2(0.5));
+                float vignette = smoothstep(1.0, 0.2, dist * (1.0 + vignetteStrength));
+                texColor.rgb *= vignette;
+            }
+
+            gl_FragColor = texColor;
+        }
+    `
+};
 
 // ── Дрон ─────────────────────────────────────────────────────────────────────
 function createFallbackDrone() {
@@ -134,8 +253,6 @@ function updatePropellers(throttle, delta, isCrashed) {
     for (const p of propellers) p.group.rotation.y += p.dir * rpm;
 }
 
-
-
 // ── Главный цикл ──────────────────────────────────────────────────────────────
 function getSensitivityScale() {
     return engineConfig.flightMode === 'light' ? 1.3 : engineConfig.flightMode === 'heavy' ? 0.5 : 1.0;
@@ -147,20 +264,25 @@ function animate() {
     const now = performance.now(), delta = Math.min((now - lastTime) / 1000, 0.05);
     lastTime = now;
 
+    fpsAccum += delta;
+    fpsFrames++;
+    if (fpsAccum >= 0.5) {
+        fpsDisplay = fpsFrames / fpsAccum;
+        fpsAccum = 0;
+        fpsFrames = 0;
+    }
+
     let yawInput = 0, pitchInput = 0, rollInput = 0, throttleInput = 0;
     const sens = getSensitivityScale();
 
     if (gamepadState.connected) {
-
         throttleInput = gamepadState.throttle;
         yawInput = gamepadState.yaw;
 
         if (engineConfig.droneMode === 'acro') {
-            // ✅ ACRO — фикс
-            rollInput = gamepadState.roll;      // ← УБРАЛИ минус
-            pitchInput = -gamepadState.pitch;    // оставляем инверсию
+            rollInput = gamepadState.roll;
+            pitchInput = -gamepadState.pitch;
         } else {
-            // ✅ ANGLE — как у тебя уже работает
             rollInput = -gamepadState.roll;
             pitchInput = gamepadState.pitch;
         }
@@ -196,7 +318,7 @@ function animate() {
         droneGroup.position.copy(cameraTarget.position);
         droneGroup.rotation.copy(droneState.rotation);
 
-        if (cameraMode === 'fpv') {
+        if (cameraMode === 'fpv' || cameraMode === 'gov') {
             droneGroup.visible = false;
         } else if (droneState.turtleMode && hudFrame % 10 < 5) {
             droneGroup.visible = false;
@@ -209,65 +331,206 @@ function animate() {
         updateWeatherParticles(weatherParticles, delta, engineConfig.weather, droneState.position);
     }
 
-    if (cameraMode === 'third') {
-        _yawEuler.set(0, droneState.rotation.y, 0, 'YXZ'); _yawQuat.setFromEuler(_yawEuler);
-        const desiredPos = cameraTarget.position.clone().add(thirdPersonOffset.clone().applyQuaternion(_yawQuat));
-
-        if (!thirdPersonInited) {
-            cameraSmoothed.copy(desiredPos);
-            cameraLookSmoothed.copy(cameraTarget.position);
-            thirdPersonInited = true;
-        }
-
-        cameraSmoothed.lerp(desiredPos, 0.08);
-        cameraLookSmoothed.lerp(cameraTarget.position.clone().add(_tmpVec.set(0, 0.5, 0)), 0.12);
-        camera.position.copy(cameraSmoothed);
-        camera.lookAt(cameraLookSmoothed);
-    }
+    // Для GOV камеры нет необходимости расчитывать позицию от 3-го лица, так как она прикреплена к дрону
 
     updatePropellers(throttle, delta, droneState.isCrashed && !droneState.turtleMode);
-
     updateAudio(throttle, Math.abs(pitchInput) + Math.abs(rollInput) + Math.abs(yawInput), droneState.health < 40);
-
     updatePeople(delta);
     raceManager.update(delta, droneState, playCheckpoint, engineConfig);
-    if (bombManager) bombManager.update(delta, colliders, playCrash);
+    if (bombManager) bombManager.update(delta, colliders, playCrash, playExplosion);
     if (tutorialManager) tutorialManager.update(delta, raceManager);
 
-    renderer.render(scene, camera);
+    if (gamepadState.justPressedSquare && bombManager) {
+        if (!bombManager.bomb.attached && !bombManager.bomb.dropped) {
+            bombManager.armBomb();
+        } else if (bombManager.bomb.attached) {
+            bombManager.dropBomb();
+            bottomLightOverlayTimer = 2.0;
+        }
+    }
 
+    const profile = getQualityProfile();
+    const allowPostFX = profile.postFX && fpvPass && (cameraMode === 'fpv' || cameraMode === 'gov');
+
+    if (allowPostFX) {
+        fpvPass.uniforms.time.value += delta;
+
+        const speed = droneState.velocity.length();
+        const lowBatRatio = droneState.battery < 20 ? (20 - droneState.battery) / 20 : 0;
+        const isCrashed = droneState.isCrashed && !droneState.turtleMode;
+
+        const baseVignette = engineConfig.vignette ? 0.3 : 0.0;
+        const speedEffect = engineConfig.vignette ? (speed * 0.015) : 0.0;
+        fpvPass.uniforms.vignetteStrength.value = baseVignette + speedEffect;
+
+        const baseChroma = engineConfig.chromatic ? 0.001 : 0.0;
+        const batChroma = engineConfig.chromatic ? (lowBatRatio * 0.008) : 0.0;
+        const crashChroma = (engineConfig.chromatic && isCrashed) ? 0.02 : 0.0;
+        const chromaTotal = baseChroma + batChroma + crashChroma;
+        fpvPass.uniforms.chromaStrength.value = chromaTotal;
+
+        const baseGlitch = engineConfig.glitch ? 0.015 : 0.0;
+        const batGlitch = engineConfig.glitch ? (lowBatRatio * 0.2) : 0.0;
+        const crashGlitch = (engineConfig.glitch && isCrashed) ? 1.0 : 0.0;
+        const glitchTotal = baseGlitch + batGlitch + crashGlitch;
+        fpvPass.uniforms.glitchStrength.value = glitchTotal;
+
+        const vigTotal = fpvPass.uniforms.vignetteStrength.value;
+        const needsPostFX = vigTotal > 0.05 || chromaTotal > 0.003 || glitchTotal > 0.01;
+        if (needsPostFX) {
+            composer.render();
+        } else {
+            renderer.render(scene, camera);
+        }
+    } else {
+        renderer.render(scene, camera);
+    }
+
+    // ── HUD (реже на low quality — экономия CPU) ──
+    if (hudFrame % profile.hudInterval !== 0) return;
     drawHUDDynamic(hudCanvas, hudCtx, hudFrame, engineConfig, {
         cameraMode,
-        velocity:     droneState.velocity,
-        position:     droneState.position,
+        velocity: droneState.velocity,
+        position: droneState.position,
         throttle,
-        rotation:     droneState.rotation,
-        health:       droneState.health,
-        battery:      droneState.battery,
-        turtleMode:   droneState.turtleMode,
-        isCrashed:    droneState.isCrashed,
-        propDamage:   droneState.propDamage,
-        weather:      engineConfig.weather,
-        raceTimer:    raceManager.raceTimer,
+        rotation: droneState.rotation,
+        health: droneState.health,
+        battery: droneState.battery,
+        turtleMode: droneState.turtleMode,
+        isCrashed: droneState.isCrashed,
+        propDamage: droneState.propDamage,
+        weather: engineConfig.weather,
+        raceTimer: raceManager.raceTimer,
         bombAttached: bombManager?.bomb?.attached,
-        bombDropped:  bombManager?.bomb?.dropped,
-        bombFlash:    bombManager?.bomb?.flashAge ?? 0,
+        bombDropped: bombManager?.bomb?.dropped,
+        bombFlash: bombManager?.bomb?.flashAge ?? 0,
+        fps: fpsDisplay,
     }, gateObjects, raceManager.nextGateIdx);
-    
+
     if (tutorialManager) {
         tutorialManager.draw(hudCtx, hudCanvas.width, hudCanvas.height);
+    }
+
+    // ── OSD "Нижняя подсветка вкл" ──
+    if (bottomLightOverlayTimer > 0) {
+        bottomLightOverlayTimer -= delta;
+        if (hudCtx) {
+            const cx = hudCanvas.width / 2;
+            const cy = hudCanvas.height / 2;
+            const ow = 300; 
+            const oh = 140;
+            
+            hudCtx.save();
+            hudCtx.fillStyle = 'rgba(80, 80, 80, 0.5)';
+            hudCtx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            hudCtx.lineWidth = 1.5;
+            
+            hudCtx.beginPath();
+            hudCtx.roundRect(cx - ow / 2, cy - oh / 2, ow, oh, 16);
+            hudCtx.fill();
+            hudCtx.stroke();
+            
+            // Текст снизу (стандартный регистр, шрифт поменьше)
+            hudCtx.fillStyle = 'white';
+            hudCtx.font = '14px "JetBrains Mono", sans-serif';
+            hudCtx.textAlign = 'center';
+            hudCtx.textBaseline = 'bottom';
+            hudCtx.fillText('Нижняя подсветка вкл', cx, cy + oh/2 - 20);
+            
+            // Отрисовка белой монохромной иконки лампочки
+            const bulbY = cy - 20;
+            hudCtx.strokeStyle = 'white';
+            hudCtx.lineWidth = 2.5;
+            hudCtx.beginPath();
+            hudCtx.arc(cx, bulbY, 14, Math.PI * 0.75, Math.PI * 2.25);
+            hudCtx.lineTo(cx + 7, bulbY + 18);
+            hudCtx.lineTo(cx - 7, bulbY + 18);
+            hudCtx.closePath();
+            hudCtx.stroke();
+            
+            // Закрашенные элементы цоколя
+            hudCtx.fillStyle = 'white';
+            hudCtx.fillRect(cx - 6, bulbY + 21, 12, 4);
+            hudCtx.fillRect(cx - 4, bulbY + 27, 8, 4);
+            
+            // Лучи
+            hudCtx.lineWidth = 2;
+            const rayR1 = 20, rayR2 = 28;
+            for(let i=0; i<=4; i++) {
+                const angle = Math.PI + Math.PI/4 * i; // От 180° до 360°
+                hudCtx.beginPath();
+                hudCtx.moveTo(cx + Math.cos(angle)*rayR1, bulbY + Math.sin(angle)*rayR1);
+                hudCtx.lineTo(cx + Math.cos(angle)*rayR2, bulbY + Math.sin(angle)*rayR2);
+                hudCtx.stroke();
+            }
+            
+            hudCtx.restore();
+        }
     }
 }
 
 export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStaticCanvas: hudStaticCanvasElement, infoElement: infoEl, config } = {}) {
     scene = new THREE.Scene();
+    droneState = new DronePhysics({
+        onCrash: playCrash,
+        onLand: playLand,
+        scene: scene,
+    });
+    droneState.droneClass = config?.droneClass ?? 'freestyle_5';
+    droneState.flightMode = config?.droneMode ?? 'angle';
+    droneState.physicsMode = config?.arcadeMode ? 'arcade' : 'realistic';
     camera = new THREE.PerspectiveCamera(config?.fov || 90, window.innerWidth / window.innerHeight, 0.1, 2000);
-    renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: config?.quality === 'high' });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, config?.quality === 'high' ? 2 : 1.5));
 
-    scene.userData.weather = config?.weather || 'clear';
-    scene.userData.map = config?.map || 'hangar';
+    const initQuality = config?.quality || 'medium';
+    renderer = new THREE.WebGLRenderer({
+        canvas: threeCanvas,
+        antialias: initQuality === 'high',
+        powerPreference: 'high-performance',
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, (QUALITY_PROFILES[initQuality] || QUALITY_PROFILES.medium).pixelRatio));
+
+    // ════════════════════════════════════════════════════════════════════════
+    // НОВОЕ: Инициализация EffectComposer
+    // ════════════════════════════════════════════════════════════════════════
+    composer = new EffectComposer(renderer);
+
+    // 1. Обычный рендер сцены
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+
+    // 2. Наложение наших FPV-эффектов
+    fpvPass = new ShaderPass(FPVShader);
+    fpvPass.uniforms.resolution.value.set(window.innerWidth, window.innerHeight);
+    composer.addPass(fpvPass);
+
+    // Устанавливаем настройки
+    engineConfig = {
+        invertPitch: config?.invertPitch ?? false,
+        flightMode: config?.flightMode ?? 'medium',
+        controllerType: config?.controllerType ?? 'gamepad',
+        droneMode: config?.droneMode ?? 'angle',
+        weather: config?.weather ?? 'clear',
+        map: config?.map ?? 'hangar',
+        droneClass: config?.droneClass ?? 'freestyle_5',
+        playerName: config?.playerName ?? 'Pilot',
+        // Загружаем настройки эффектов
+        vignette: config?.vignette ?? true,
+        chromatic: config?.chromatic ?? true,
+        glitch: config?.glitch ?? true,
+        cameraMode: config?.cameraMode ?? 'fpv',
+        quality: initQuality,
+    };
+
+    if (getQualityProfile().disableFx) {
+        engineConfig.vignette = false;
+        engineConfig.chromatic = false;
+        engineConfig.glitch = false;
+    }
+
+    scene.userData.weather = engineConfig.weather;
+    scene.userData.map = engineConfig.map;
+    scene.userData.quality = engineConfig.quality;
 
     const fogColor = scene.userData.weather === 'rain' ? 0x4a5a6a
         : scene.userData.weather === 'snow' ? 0xb0c8d8
@@ -275,39 +538,23 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
     scene.fog = new THREE.Fog(fogColor, 250, 750);
     renderer.setClearColor(fogColor);
 
-    scene.add(createSky(config));
-    createSunAndLighting(scene, config);
-    createGround(scene, config);
+    scene.add(createSky(engineConfig));
+    createSunAndLighting(scene, engineConfig);
+    createGround(scene, engineConfig);
     buildTrack(scene, colliders, gateObjects);
     raceManager.setGates(gateObjects);
 
     bombManager = new BombManager(scene, droneState);
-    weatherParticles = createWeatherParticles(scene, scene.userData.weather);
+    weatherParticles = createWeatherParticles(scene, scene.userData.weather, engineConfig.quality);
 
     scene.add(cameraTarget);
+    applyCameraMode(engineConfig.cameraMode);
 
-    camera.position.set(
-        FPV_CAM_OFFSET.x,
-        FPV_CAM_OFFSET.y,
-        FPV_CAM_OFFSET.z
-    );
-    camera.rotation.x = THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG);
-    cameraTarget.add(camera);
-
-    // Обработчики ввода — сохраняем ссылки для dispose()
     const onKeyDown = (e) => {
         pressedKeys.add(e.code);
         if (e.code === 'Tab') {
             e.preventDefault();
-            cameraMode = cameraMode === 'fpv' ? 'third' : 'fpv';
-            thirdPersonInited = false;
-            if (cameraMode === 'fpv') {
-                cameraTarget.add(camera);
-                camera.position.set(FPV_CAM_OFFSET.x, FPV_CAM_OFFSET.y, FPV_CAM_OFFSET.z);
-                camera.rotation.set(THREE.MathUtils.degToRad(FPV_CAM_TILT_DEG), 0, 0);
-            } else {
-                scene.attach(camera);
-            }
+            applyCameraMode(cameraMode === 'fpv' ? 'gov' : 'fpv');
         }
         if (e.code === 'KeyM') {
             engineConfig.droneMode = engineConfig.droneMode === 'angle' ? 'sport'
@@ -316,8 +563,12 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
             droneState.angularVelocity.set(0, 0, 0);
         }
         if (e.code === 'KeyN' && bombManager) {
-            if (!bombManager.bomb.attached && !bombManager.bomb.dropped) bombManager.armBomb();
-            else if (bombManager.bomb.attached) bombManager.dropBomb();
+            if (!bombManager.bomb.attached && !bombManager.bomb.dropped) {
+                bombManager.armBomb();
+            } else if (bombManager.bomb.attached) {
+                bombManager.dropBomb();
+                bottomLightOverlayTimer = 2.0;
+            }
         }
         if (e.code === 'KeyR' && (droneState.health <= 0 || droneState.turtleMode)) {
             if (gateObjects.length > 0) {
@@ -331,13 +582,24 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
         }
     };
     const onKeyUp = (e) => pressedKeys.delete(e.code);
+
     const onResize = () => {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
+
+        // НОВОЕ: Обновляем размеры для постобработки
+        applyRendererQuality(engineConfig.quality || 'medium');
+        if (composer) composer.setSize(window.innerWidth, window.innerHeight);
+        if (fpvPass) fpvPass.uniforms.resolution.value.set(window.innerWidth, window.innerHeight);
+
         if (hudCanvas) {
             hudCanvas.width = window.innerWidth;
             hudCanvas.height = window.innerHeight;
+        }
+        if (hudStaticCanvas) {
+            hudStaticCanvas.width = window.innerWidth;
+            hudStaticCanvas.height = window.innerHeight;
         }
     };
 
@@ -346,17 +608,7 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
     window.addEventListener('resize', onResize);
 
     infoElement = infoEl || null;
-    engineConfig = {
-        invertPitch: config?.invertPitch ?? false,
-        flightMode: config?.flightMode ?? 'medium',
-        controllerType: config?.controllerType ?? 'gamepad',
-        droneMode: config?.droneMode ?? 'angle',
-        weather: config?.weather ?? 'clear',
-        map: config?.map ?? 'hangar',
-        droneClass: config?.droneClass ?? 'freestyle_5',
-        playerName: config?.playerName ?? 'Pilot',
-    };
-    
+
     if (engineConfig.map === 'tutorial') {
         tutorialManager = new TutorialManager(scene, droneState, hudCanvas);
     } else {
@@ -387,11 +639,9 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
     document.addEventListener('pointerdown', tryAudioInit, { once: true });
     window.addEventListener('gamepadconnected', tryAudioInit, { once: true });
 
-    let animRunning = true;
     lastTime = performance.now();
     animate();
 
-    // ── dispose() — освобождает ресурсы при выходе из игры ────────────────
     return function dispose() {
         window.removeEventListener('keydown', onKeyDown);
         window.removeEventListener('keyup', onKeyUp);
@@ -399,11 +649,51 @@ export function initEngine({ threeCanvas, hudCanvas: hudCanvasElement, hudStatic
         destroyGamepadVisualizer();
         disposeAudio();
         if (droneState && droneState.dispose) droneState.dispose();
+        if (composer) {
+            // Очищаем композер
+            composer.passes.forEach(p => p.dispose && p.dispose());
+            composer = null;
+        }
         if (renderer) {
             renderer.dispose();
             renderer = null;
         }
-        scene  = null;
+        scene = null;
         camera = null;
     };
+}
+export function updateEngineConfig(newConfig) {
+    if (engineConfig) {
+        engineConfig = { ...engineConfig, ...newConfig };
+
+        if (droneState) {
+            if (typeof newConfig?.droneMode === 'string') droneState.flightMode = newConfig.droneMode;
+            if (typeof newConfig?.droneClass === 'string') droneState.droneClass = newConfig.droneClass;
+            if (typeof newConfig?.arcadeMode === 'boolean') droneState.physicsMode = newConfig.arcadeMode ? 'arcade' : 'realistic';
+        }
+
+        if (typeof newConfig?.quality === 'string') {
+            if (scene) scene.userData.quality = newConfig.quality;
+            applyRendererQuality(newConfig.quality);
+            const profile = QUALITY_PROFILES[newConfig.quality] || QUALITY_PROFILES.medium;
+            if (profile.disableFx) {
+                engineConfig.vignette = false;
+                engineConfig.chromatic = false;
+                engineConfig.glitch = false;
+            }
+        }
+
+        if (typeof newConfig?.fov === 'number' && camera) {
+            camera.fov = newConfig.fov;
+            camera.updateProjectionMatrix();
+        }
+
+        if (typeof newConfig?.controllerType === 'string') {
+            setControllerType(newConfig.controllerType);
+        }
+
+        if (typeof newConfig?.cameraMode === 'string' && newConfig.cameraMode !== cameraMode) {
+            applyCameraMode(newConfig.cameraMode);
+        }
+    }
 }

@@ -18,21 +18,22 @@ function smoothVal(key, target, alpha = 0.12) {
     return _smooth[key];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Правильный расчёт относительного угла к цели
-// Three.js: rotation.y = θ → локальная ось -Z дрона в мире = (-sinθ, 0, -cosθ)
-// Возвращает угол в радианах: > 0 = цель правее (поворот по часовой), < 0 = левее
-// ─────────────────────────────────────────────────────────────────────────────
 function calcRelativeAngle(droneRotY, dx, dz) {
-    const fX = -Math.sin(droneRotY);  // компонент X вектора "вперёд" дрона в мире
-    const fZ = -Math.cos(droneRotY);  // компонент Z
-    const cross = fX * dz - fZ * dx; // > 0 → цель правее
-    const dot = fX * dx + fZ * dz; // > 0 → цель впереди
+    const fX = -Math.sin(droneRotY);
+    const fZ = -Math.cos(droneRotY);
+    const cross = fX * dz - fZ * dx;
+    const dot = fX * dx + fZ * dz;
     return Math.atan2(cross, dot);
 }
 
+function normalizeAngle(angle) {
+    while (angle > Math.PI) angle -= 2 * Math.PI;
+    while (angle < -Math.PI) angle += 2 * Math.PI;
+    return angle;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Вспомогательные функции рисования HUD
+// Элементы интерфейса
 // ─────────────────────────────────────────────────────────────────────────────
 
 function drawTelRow(ctx, x, y, icon, label, rawValue, maxValue, displayText, color, barW = 150) {
@@ -66,229 +67,291 @@ function drawTelRow(ctx, x, y, icon, label, rawValue, maxValue, displayText, col
     }
 }
 
-function drawCompassCenter(ctx, cx, cyTop, normYaw, droneState, gateObjects, nextGateIdx) {
-    const cW = 320, cH = 32, cX = cx - cW / 2, cY = cyTop;
-    const degsPerPx = 90 / (cW / 2);
-    const cardinals = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ'];
+// ── НОВОЕ: Таймер слева под телеметрией ─────────────────────────────────────
+function drawTimerLeft(ctx, x, y, raceTimer) {
+    if (!raceTimer) return;
+    const hasStarted = raceTimer.running || raceTimer.lapCount > 0;
+    const timeMs = raceTimer.running ? raceTimer.elapsed : (raceTimer.lapTime || 0);
+
+    const color = hasStarted ? '#ffee00' : 'rgba(255,255,255,0.2)';
+    const status = hasStarted ? 'ВРЕМЯ КРУГА' : 'ОЖИДАНИЕ СТАРТА';
 
     ctx.save();
-    const bgGrad = ctx.createLinearGradient(cX, 0, cX + cW, 0);
-    bgGrad.addColorStop(0, 'rgba(0,0,0,0)');
-    bgGrad.addColorStop(0.12, 'rgba(0,0,0,0.65)');
-    bgGrad.addColorStop(0.88, 'rgba(0,0,0,0.65)');
-    bgGrad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = bgGrad;
-    ctx.beginPath(); ctx.roundRect(cX, cY, cW, cH, 6); ctx.fill();
 
-    ctx.strokeStyle = 'rgba(0,230,100,0.15)';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.roundRect(cX, cY, cW, cH, 6); ctx.stroke();
+    // Иконка и статус
+    ctx.fillStyle = color + 'cc';
+    ctx.font = `10px "JetBrains Mono", monospace`;
+    ctx.fillText('⏱', x, y);
 
-    ctx.beginPath(); ctx.roundRect(cX + 1, cY + 1, cW - 2, cH - 2, 5); ctx.clip();
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = `bold 8px "JetBrains Mono", monospace`;
+    ctx.fillText(status, x + 16, y - 2);
 
-    for (let d = -180; d <= 180; d += 15) {
-        const absDeg = ((normYaw + d) % 360 + 360) % 360;
-        const px = cx + d / degsPerPx;
-        if (px < cX - 20 || px > cX + cW + 20) continue;
+    // Само время текущего круга (крупно)
+    ctx.shadowColor = color;
+    ctx.shadowBlur = hasStarted ? 8 : 0;
+    ctx.fillStyle = color;
+    ctx.font = `bold 22px "JetBrains Mono", monospace`;
+    ctx.fillText(formatTime(timeMs), x + 14, y + 20);
 
-        const isMain = absDeg % 90 === 0;
-        const isSub = absDeg % 45 === 0;
-        const fade = Math.max(0, 1 - Math.abs(px - cx) / (cW * 0.45));
+    ctx.shadowBlur = 0;
 
-        ctx.globalAlpha = (isMain ? 0.95 : isSub ? 0.6 : 0.2) * fade;
-        ctx.strokeStyle = isMain ? '#00e664' : '#ffffff';
-        ctx.lineWidth = isMain ? 1.5 : 0.8;
-        ctx.beginPath();
-        ctx.moveTo(px, cY + cH - 2);
-        ctx.lineTo(px, cY + cH - (isMain ? 12 : 8));
-        ctx.stroke();
-
-        if (isMain || isSub) {
-            ctx.fillStyle = isMain ? '#00e664' : '#ffffff';
-            ctx.font = isMain ? 'bold 11px monospace' : '9px monospace';
-            ctx.textAlign = 'center';
-            ctx.fillText(cardinals[Math.round(absDeg / 45) % 8], px, cY + 14);
+    // История (прошлый круг и разница)
+    if (raceTimer.lapHistory && raceTimer.lapHistory.length > 0) {
+        const lastLap = raceTimer.lapHistory[raceTimer.lapHistory.length - 1];
+        
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = `bold 10px "JetBrains Mono", monospace`;
+        ctx.fillText(`ПРОШЛЫЙ: ${formatTime(lastLap.time)}`, x + 14, y + 36);
+        
+        if (lastLap.delta !== null) {
+            const isFaster = lastLap.delta < 0;
+            ctx.fillStyle = isFaster ? '#00e664' : '#ff4444';
+            const sign = isFaster ? '-' : '+';
+            ctx.fillText(`${sign}${formatTime(Math.abs(lastLap.delta))}`, x + 14, y + 48);
+        } else {
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.fillText(`БАЗОВОЕ ВРЕМЯ`, x + 14, y + 48);
         }
     }
 
-    // Маркеры колец на компасе
+    ctx.restore();
+}
+
+// ── НОВОЕ: Красивый минималистичный компас ──────────────────────────────────
+function drawMinimalCompass(ctx, cx, cyTop, normYaw, droneState, gateObjects, nextGateIdx) {
+    const cW = 400;
+    const cH = 30;
+    const cX = cx - cW / 2;
+    const degsPerPx = 90 / (cW / 2.5);
+    const cardinals = ['С', 'СВ', 'В', 'ЮВ', 'Ю', 'ЮЗ', 'З', 'СЗ'];
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cX, cyTop, cW, cH + 20);
+    ctx.clip();
+    ctx.textBaseline = 'top';
+
+    // ── Итерируемся по ФИКСИРОВАННЫМ градусам (0,15,30…345) ──────────────────
+    // и считаем смещение от текущего курса. Так absDeg всегда целый → % 45 надёжен.
+    for (let tickDeg = 0; tickDeg < 360; tickDeg += 15) {
+        // разница в градусах относительно текущего курса, нормализованная к -180..180
+        let diff = tickDeg - normYaw;
+        diff = ((diff + 180) % 360 + 360) % 360 - 180;
+
+        const px = cx + diff / degsPerPx;
+        if (px < cX || px > cX + cW) continue;
+
+        const isMain = tickDeg % 90 === 0;
+        const isSub = tickDeg % 45 === 0;
+
+        const distFromCenter = Math.abs(px - cx);
+        const alpha = Math.max(0, 1 - distFromCenter / (cW / 2));
+
+        // Засечки
+        ctx.beginPath();
+        ctx.moveTo(px, cyTop + 15);
+        ctx.lineTo(px, cyTop + 15 - (isMain ? 10 : isSub ? 7 : 4));
+        ctx.strokeStyle = `rgba(255,255,255,${(isMain ? 0.9 : isSub ? 0.5 : 0.2) * alpha})`;
+        ctx.lineWidth = isMain ? 1.5 : 1;
+        ctx.stroke();
+
+        // Буквы
+        if (isMain || isSub) {
+            ctx.fillStyle = `rgba(255,255,255,${(isMain ? 1.0 : 0.6) * alpha})`;
+            ctx.font = isMain
+                ? 'bold 12px "JetBrains Mono", monospace'
+                : '10px "JetBrains Mono", monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(cardinals[tickDeg / 45], px, cyTop + 18);
+        }
+    }
+
+    // ── Маркеры колец на компасе ──────────────────────────────────────────────
     if (gateObjects?.length > 0 && droneState) {
         const dp = droneState.position;
         const gatesToShow = [
-            { idx: nextGateIdx, alpha: 1.0, size: 4 },
-            { idx: (nextGateIdx + 1) % gateObjects.length, alpha: 0.4, size: 2 },
+            { idx: nextGateIdx, alpha: 1.0, size: 3 },
+            { idx: (nextGateIdx + 1) % gateObjects.length, alpha: 0.4, size: 1.5 },
         ];
+
         gatesToShow.forEach(gInfo => {
             if (gInfo.idx >= gateObjects.length) return;
             const gp = gateObjects[gInfo.idx];
             const angleToGateRad = Math.atan2(gp.position.x - dp.x, -(gp.position.z - dp.z));
             const angleToGateDeg = ((THREE.MathUtils.radToDeg(angleToGateRad) % 360) + 360) % 360;
+
             let diff = angleToGateDeg - normYaw;
             diff = ((diff + 180) % 360 + 360) % 360 - 180;
             const px = cx + diff / degsPerPx;
+
             if (px >= cX && px <= cX + cW) {
-                const colorHex = gp.baseColor ? '#' + gp.baseColor.toString(16).padStart(6, '0') : '#ff8833';
+                const colorHex = gp.baseColor ? '#' + gp.baseColor.toString(16).padStart(6, '0') : '#00e664';
+                const distAlpha = Math.max(0, 1 - Math.abs(px - cx) / (cW / 2));
                 ctx.fillStyle = colorHex;
-                ctx.globalAlpha = gInfo.alpha;
+                ctx.globalAlpha = gInfo.alpha * distAlpha;
                 ctx.beginPath();
-                ctx.arc(px, cY + cH - 14, gInfo.size, 0, Math.PI * 2);
+                ctx.arc(px, cyTop - 2, gInfo.size, 0, Math.PI * 2);
                 ctx.fill();
+                ctx.globalAlpha = 1;
             }
         });
     }
 
     ctx.restore();
 
-    // Маркер центра компаса
-    ctx.fillStyle = '#00e664';
+    // Статичный центральный треугольник
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,230,100,0.9)';
     ctx.beginPath();
-    ctx.moveTo(cx, cY + cH - 3);
-    ctx.lineTo(cx - 5, cY + cH + 5);
-    ctx.lineTo(cx + 5, cY + cH + 5);
+    ctx.moveTo(cx, cyTop - 2);
+    ctx.lineTo(cx - 4, cyTop + 4);
+    ctx.lineTo(cx + 4, cyTop + 4);
     ctx.fill();
-    ctx.font = 'bold 9px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(`${Math.round(normYaw)}°`, cx, cY + cH + 14);
+    ctx.restore();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Стрелка к кольцу — переработана для наглядности
-// relAngle > 0 → поворот ВПРАВО (по часовой)
-// relAngle < 0 → поворот ВЛЕВО
-// relAngle ≈ 0 → прямо
-// ─────────────────────────────────────────────────────────────────────────────
-function drawGateArrow(ctx, cx, cyTop, relAngle, dist, gateColor, gateIdx, totalGates) {
-    const col = gateColor || '#ff8833';
-    const bY = cyTop + 48;
-    const bW = 200, bH = 64;
-    const bX = cx - bW / 2;
+// ── НОВОЕ: Элегантный указатель следующего кольца ───────────────────────────
+function drawSleekGatePointer(ctx, cx, cy, relAngle, dist, gateColor, gateIdx, totalGates) {
+    const col = gateColor || '#00e664';
 
     ctx.save();
+    ctx.translate(cx, cy);
 
-    // Панель
-    ctx.fillStyle = 'rgba(0,0,0,0.68)';
-    ctx.strokeStyle = col + '50';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.roundRect(bX, bY, bW, bH, 8); ctx.fill(); ctx.stroke();
+    // Центральный текст (Дистанция)
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.font = 'bold 11px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${dist}m`, 0, 0);
 
-    // ── Большой круг со стрелкой (левая часть) ──────────────────────────────
-    const R = 26;
-    const ax = bX + 42, ay = bY + bH / 2;
-
-    // Фоновый круг
-    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(ax, ay, R, 0, Math.PI * 2); ctx.stroke();
-
-    // Крест-прицел
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-    ctx.lineWidth = 0.8;
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath();
-    ctx.moveTo(ax - R, ay); ctx.lineTo(ax + R, ay);
-    ctx.moveTo(ax, ay - R); ctx.lineTo(ax, ay + R);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Сама стрелка (вращается на relAngle)
-    ctx.save();
-    ctx.translate(ax, ay);
-    ctx.rotate(relAngle);
-    ctx.shadowColor = col; ctx.shadowBlur = 12;
+    // Маленький текст над дистанцией (Номер кольца)
     ctx.fillStyle = col;
-    // Тело стрелки
+    ctx.font = '7px "JetBrains Mono", monospace';
+    ctx.fillText(`GATE ${gateIdx + 1}`, 0, -12);
+
+    // Вращающаяся стрелка (Шеврон) по орбите
+    const orbitRadius = 24;
+    ctx.rotate(relAngle);
+
+    ctx.shadowColor = col;
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = col;
+
+    // Рисуем стилизованный шеврон
     ctx.beginPath();
-    ctx.moveTo(0, -(R - 3));          // острие
-    ctx.lineTo(8, 8);
-    ctx.lineTo(2, 4);
-    ctx.lineTo(2, R - 6);             // хвост правый
-    ctx.lineTo(-2, R - 6);            // хвост левый
-    ctx.lineTo(-2, 4);
-    ctx.lineTo(-8, 8);
+    ctx.moveTo(0, -orbitRadius - 6);  // Острие (смотрит "вверх" относительно вращения)
+    ctx.lineTo(5, -orbitRadius + 2);  // Правое крыло
+    ctx.lineTo(0, -orbitRadius - 1);  // Внутренний вырез
+    ctx.lineTo(-5, -orbitRadius + 2); // Левое крыло
     ctx.closePath();
     ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.restore();
-
-    // Центральный кружок
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.beginPath(); ctx.arc(ax, ay, 4, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = col + 'aa'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(ax, ay, 4, 0, Math.PI * 2); ctx.stroke();
-
-    // ── Текст (правая часть) ─────────────────────────────────────────────────
-    const tx = bX + 80;
-
-    // Бейдж «КОЛЬЦО N/M»
-    ctx.fillStyle = 'rgba(255,255,255,0.20)';
-    ctx.font = 'bold 7px "JetBrains Mono", monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(totalGates > 0 ? `КОЛЬЦО ${gateIdx + 1}/${totalGates}` : 'СЛЕДУЮЩЕЕ КОЛЬЦО', tx, bY + 14);
-
-    // Направление словом + иконка
-    const absA = Math.abs(relAngle);
-    let dirLabel, dirIcon;
-    if (absA < 0.22) {                     // < ~13°
-        dirLabel = 'ПРЯМО'; dirIcon = '↑';
-    } else if (absA > Math.PI - 0.22) {    // > ~167°
-        dirLabel = 'СЗАДИ'; dirIcon = '↓';
-    } else if (relAngle > 0) {
-        dirLabel = 'ВПРАВО'; dirIcon = '→';
-    } else {
-        dirLabel = 'ВЛЕВО'; dirIcon = '←';
-    }
-
-    ctx.fillStyle = col;
-    ctx.font = `bold 18px "JetBrains Mono", monospace`;
-    ctx.fillText(`${dirIcon} ${dirLabel}`, tx, bY + 36);
-
-    // Дистанция
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '11px "JetBrains Mono", monospace';
-    ctx.fillText(`${dist} м`, tx, bY + 54);
-
-    // Угловая полоска (насколько надо повернуть — дуга вокруг круга)
-    if (absA > 0.15 && absA < Math.PI - 0.15) {
-        const arcStart = -Math.PI / 2;
-        const arcEnd = arcStart + relAngle;
-        ctx.strokeStyle = col + '70';
-        ctx.lineWidth = 3;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.arc(ax, ay, R + 5, arcStart, arcEnd, relAngle < 0);
-        ctx.stroke();
-        ctx.lineCap = 'butt';
-    }
 
     ctx.restore();
 }
 
-function drawTimerTop(ctx, cx, raceTimer, nextGateIdx) {
-    if (!raceTimer) return;
-    const hasStarted = nextGateIdx > 0 || raceTimer.finished;
-    const timeMs = hasStarted ? (raceTimer.running ? raceTimer.elapsed : raceTimer.lapTime) : 0;
-    const color = raceTimer.finished ? '#00ff88' : hasStarted ? '#ffee00' : 'rgba(255,255,255,0.2)';
-
+function drawAttitudeHUD(ctx, cx, cy, rotation, velocity) {
     ctx.save();
-    const tW = 180, tH = 36;
-    const tx = cx - tW / 2, ty = 8;
 
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.beginPath(); ctx.roundRect(tx, ty, tW, tH, 8); ctx.fill();
-    ctx.strokeStyle = color + '40'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.roundRect(tx, ty, tW, tH, 8); ctx.stroke();
+    const fovScale = 4.5;
+    const clipSize = 350;
+    const colorLine = 'rgba(255, 255, 255, 0.65)';
+    const colorText = 'rgba(255, 255, 255, 0.8)';
+    const colorDir = 'rgba(0, 230, 100, 0.9)';
 
-    ctx.shadowColor = color; ctx.shadowBlur = hasStarted ? 10 : 0;
-    ctx.fillStyle = color;
-    ctx.font = `bold 22px "JetBrains Mono", monospace`;
+    const pitch = rotation.x;
+    const roll = rotation.z;
+    const yaw = rotation.y;
+
+    ctx.beginPath();
+    ctx.rect(cx - clipSize / 2, cy - clipSize / 2, clipSize, clipSize);
+    ctx.clip();
+
+    ctx.translate(cx, cy);
+    ctx.rotate(roll);
+
+    const pitchDeg = THREE.MathUtils.radToDeg(pitch);
+    ctx.translate(0, pitchDeg * fovScale);
+
+    ctx.lineWidth = 0.8;
+    ctx.font = '10px "JetBrains Mono", monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(formatTime(timeMs), cx, ty + 20);
-    ctx.shadowBlur = 0;
+    ctx.textBaseline = 'middle';
 
-    const status = raceTimer.finished ? 'КРУГ ЗАВЕРШЕН' : hasStarted ? 'ГОНКА НАЧАТА' : 'ОЖИДАНИЕ СТАРТА';
-    ctx.fillStyle = 'rgba(255,255,255,0.3)';
-    ctx.font = 'bold 8px "JetBrains Mono", monospace';
-    ctx.fillText(status, cx, ty + 31);
+    for (let i = -80; i <= 80; i += 10) {
+        if (i === 0) continue;
+
+        const yOffset = -i * fovScale;
+        const width = (i % 20 === 0) ? 60 : 30;
+        const tickDir = i > 0 ? 4 : -4;
+
+        ctx.beginPath();
+        if (i < 0) {
+            ctx.setLineDash([6, 4]);
+            ctx.strokeStyle = 'rgba(255, 100, 50, 0.5)';
+        } else {
+            ctx.setLineDash([]);
+            ctx.strokeStyle = colorLine;
+        }
+
+        ctx.moveTo(-width / 2, yOffset);
+        ctx.lineTo(width / 2, yOffset);
+
+        ctx.moveTo(-width / 2, yOffset); ctx.lineTo(-width / 2, yOffset + tickDir);
+        ctx.moveTo(width / 2, yOffset); ctx.lineTo(width / 2, yOffset + tickDir);
+        ctx.stroke();
+
+        if (i % 20 === 0) {
+            ctx.setLineDash([]);
+            ctx.fillStyle = i < 0 ? 'rgba(255, 150, 100, 0.7)' : colorText;
+            ctx.fillText(Math.abs(i), -width / 2 - 12, yOffset);
+            ctx.fillText(Math.abs(i), width / 2 + 12, yOffset);
+        }
+    }
+
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = colorLine;
+    ctx.beginPath();
+    ctx.moveTo(-120, 0); ctx.lineTo(-30, 0);
+    ctx.moveTo(30, 0); ctx.lineTo(120, 0);
+    ctx.stroke();
+
+    ctx.restore();
+    ctx.save();
+
+    const speedTotal = velocity.length();
+
+    if (speedTotal > 2.0) {
+        const flightYaw = Math.atan2(velocity.x, velocity.z);
+        let slipYaw = normalizeAngle(yaw - flightYaw + Math.PI);
+
+        const flightPitch = Math.atan2(velocity.y, Math.hypot(velocity.x, velocity.z));
+        let slipPitch = normalizeAngle(pitch + flightPitch);
+
+        const targetDirX = -slipYaw * fovScale * 50;
+        const targetDirY = slipPitch * fovScale * 50;
+
+        const dirX = smoothVal('dirX', targetDirX, 0.15);
+        const dirY = smoothVal('dirY', targetDirY, 0.15);
+
+        const clampLimit = 120;
+        const drawX = cx + Math.max(-clampLimit, Math.min(clampLimit, dirX));
+        const drawY = cy + Math.max(-clampLimit, Math.min(clampLimit, dirY));
+
+        ctx.translate(drawX, drawY);
+        ctx.rotate(-roll);
+
+        ctx.strokeStyle = colorDir;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(0, 0, 5, 0, Math.PI * 2);
+        ctx.moveTo(-15, 0); ctx.lineTo(-5, 0);
+        ctx.moveTo(15, 0); ctx.lineTo(5, 0);
+        ctx.moveTo(0, -15); ctx.lineTo(0, -5);
+        ctx.stroke();
+    }
+
     ctx.restore();
 }
 
@@ -322,6 +385,7 @@ export function drawHUDStatic(canvas, ctx, engineConfig, droneClassLabel) {
     if (!canvas || !ctx) return;
     const W = canvas.width, H = canvas.height, cx = W / 2, cy = H / 2;
     ctx.clearRect(0, 0, W, H);
+
     const vg = ctx.createRadialGradient(cx, cy, H * 0.18, cx, cy, H * 0.85);
     vg.addColorStop(0, 'rgba(0,0,0,0)');
     vg.addColorStop(0.55, 'rgba(0,0,0,0.05)');
@@ -329,14 +393,17 @@ export function drawHUDStatic(canvas, ctx, engineConfig, droneClassLabel) {
     ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
 
     ctx.save();
-    ctx.strokeStyle = 'rgba(180,255,180,0.85)'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(180,255,180,0.6)';
+    ctx.lineWidth = 1.0;
     ctx.beginPath();
-    ctx.moveTo(cx - 30, cy); ctx.lineTo(cx - 8, cy);
-    ctx.moveTo(cx + 8, cy); ctx.lineTo(cx + 30, cy);
-    ctx.moveTo(cx, cy + 8); ctx.lineTo(cx, cy + 18);
+    ctx.moveTo(cx - 15, cy); ctx.lineTo(cx - 4, cy);
+    ctx.moveTo(cx + 4, cy); ctx.lineTo(cx + 15, cy);
+    ctx.moveTo(cx, cy - 15); ctx.lineTo(cx, cy - 4);
+    ctx.moveTo(cx, cy + 4); ctx.lineTo(cx, cy + 15);
     ctx.stroke();
-    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-    ctx.strokeStyle = '#00e664'; ctx.stroke();
+
+    ctx.beginPath(); ctx.arc(cx, cy, 1, 0, Math.PI * 2);
+    ctx.fillStyle = '#00e664'; ctx.fill();
     ctx.restore();
 }
 
@@ -351,7 +418,7 @@ export function drawHUDDynamic(canvas, ctx, frame, engineConfig, droneState, gat
     const {
         cameraMode, velocity, position, throttle, rotation,
         health, battery, turtleMode, isCrashed,
-        raceTimer, altHoldTarget,
+        raceTimer, altHoldTarget, fps,
     } = droneState;
 
     if (cameraMode === 'third') {
@@ -386,24 +453,32 @@ export function drawHUDDynamic(canvas, ctx, frame, engineConfig, droneState, gat
     drawTelRow(ctx, tx, ty + gap * 3, '◎', 'КОЛЬЦО', gRatio, 1, gStr, '#ff8833');
     const hCol = health < 30 ? '#ff4444' : health < 65 ? '#ffee00' : '#00e664';
     drawTelRow(ctx, tx, ty + gap * 4, '❤', 'СИСТЕМЫ', sHlth, 100, `${Math.round(health)}%`, hCol);
+
+    // Таймер теперь слева, под телеметрией
+    drawTimerLeft(ctx, tx, ty + gap * 5 + 16, raceTimer);
     ctx.restore();
 
-    // ── Центральный блок (верх-центр) ─────────────────────────────────────────
-    const normYaw = ((THREE.MathUtils.radToDeg(rotation.y) % 360) + 360) % 360;
-    drawTimerTop(ctx, cx, raceTimer, nextGateIdx);
-    drawCompassCenter(ctx, cx, 52, normYaw, droneState, gateObjects, nextGateIdx);
+    // ── Авиагоризонт (в центре экрана) ────────────────────────────────────────
+    if (!isCrashed) {
+        drawAttitudeHUD(ctx, cx, cy, rotation, velocity);
+    }
 
+    // ── Компас (верх-центр) ───────────────────────────────────────────────────
+    const normYaw = ((THREE.MathUtils.radToDeg(rotation.y) % 360) + 360) % 360;
+    drawMinimalCompass(ctx, cx, 15, normYaw, droneState, gateObjects, nextGateIdx);
+
+    // ── Указатель на следующее кольцо (под компасом) ──────────────────────────
     if (gateObjects.length > 0) {
         const gp = gateObjects[nextGateIdx], dp = position;
         const dx = gp.position.x - dp.x;
         const dz = gp.position.z - dp.z;
 
-        // ✅ Правильный расчёт: учитывает локальную ось -Z дрона в мировом пространстве
         const relativeAngle = calcRelativeAngle(rotation.y, dx, dz);
-
         const dist = Math.round(dp.distanceTo(gp.position));
-        const gc = gp.baseColor ? '#' + gp.baseColor.toString(16).padStart(6, '0') : '#ff8833';
-        drawGateArrow(ctx, cx, 52, relativeAngle, dist, gc, nextGateIdx, gateObjects.length);
+        const gc = gp.baseColor ? '#' + gp.baseColor.toString(16).padStart(6, '0') : '#00e664';
+
+        // Рисуем стильный индикатор прямо под компасом (y = 75)
+        drawSleekGatePointer(ctx, cx, 75, relativeAngle, dist, gc, nextGateIdx, gateObjects.length);
     }
 
     // ── Режим полёта (право-низ) ──────────────────────────────────────────────
@@ -440,10 +515,26 @@ export function drawHUDDynamic(canvas, ctx, frame, engineConfig, droneState, gat
         ctx.restore();
     }
 
+    // ── FPS (правый верхний угол) ───────────────────────────────────────────
+    if (typeof fps === 'number') {
+        const fpsVal = Math.round(fps);
+        const fpsColor = fpsVal >= 55 ? '#00e664' : fpsVal >= 35 ? '#ffcc00' : '#ff4444';
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.beginPath();
+        ctx.roundRect(W - 98, 10, 66, 22, 4);
+        ctx.fill();
+        ctx.font = 'bold 12px "JetBrains Mono", monospace';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = fpsColor;
+        ctx.fillText(`${fpsVal} FPS`, W - 40, 25);
+        ctx.restore();
+    }
+
     // ── Краш ─────────────────────────────────────────────────────────────────
     if (isCrashed && !turtleMode) {
         ctx.save();
-        ctx.fillStyle = 'rgba(200,0,0,0.1)'; ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = 'rgba(200,0,0,0.25)'; ctx.fillRect(0, 0, W, H);
         ctx.fillStyle = '#ff4'; ctx.font = 'bold 24px monospace'; ctx.textAlign = 'center';
         ctx.fillText('СИСТЕМНЫЙ СБОЙ', cx, cy - 20);
         ctx.font = '14px monospace'; ctx.fillStyle = '#fff';
